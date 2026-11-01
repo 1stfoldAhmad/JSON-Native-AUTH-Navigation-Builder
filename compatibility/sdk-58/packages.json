@@ -1,0 +1,57 @@
+{
+  "sdkVersion": "58.0.0",
+  "releaseDate": "2026-10-15",
+  "reactNativeVersion": "0.88.0",
+  "reactVersion": "19.0.0",
+  "corePackages": {
+    "expo": "~58.0.0",
+    "react": "19.0.0",
+    "react-native": "0.88.0"
+  },
+  "navigationPackages": {
+    "@expo/ui": "~58.0.0",
+    "expo-router": "~5.0.0",
+    "expo-linking": "~8.0.0",
+    "expo-status-bar": "~3.0.0",
+    "react-native-safe-area-context": "5.4.0",
+    "react-native-screens": "~4.10.0"
+  },
+  "authPackages": {
+    "expo-secure-store": "~15.0.0",
+    "expo-crypto": "~15.0.0"
+  },
+  "optionalProviderPackages": {
+    "oidc": {
+      "expo-auth-session": "~7.0.0",
+      "expo-web-browser": "~15.0.0"
+    },
+    "oauth": {
+      "expo-auth-session": "~7.0.0",
+      "expo-web-browser": "~15.0.0"
+    },
+    "apple": {
+      "expo-apple-authentication": "~8.0.0"
+    },
+    "google": {
+      "@react-native-google-signin/google-signin": "^14.0.0"
+    },
+    "supabase": {
+      "@supabase/supabase-js": "^2.49.0"
+    },
+    "firebase": {
+      "@react-native-firebase/app": "^21.11.0",
+      "@react-native-firebase/auth": "^21.11.0"
+    },
+    "clerk": {
+      "@clerk/clerk-expo": "^2.8.0"
+    },
+    "biometric": {
+      "expo-local-authentication": "~16.0.0"
+    }
+  },
+  "devPackages": {
+    "@types/react": "~19.0.10",
+    "typescript": "~5.7.2",
+    "jest-expo": "~58.0.0"
+  }
+}

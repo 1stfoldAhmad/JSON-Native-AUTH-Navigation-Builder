@@ -1,0 +1,65 @@
+export const INTEGRATION_JSON_SCHEMA = {
+  $id: 'https://expo-foundation.dev/schemas/integration.schema.json',
+  title: 'ExpoFoundationIntegrationConfig',
+  type: 'object',
+  required: ['schemaVersion', 'authNavigation'],
+  additionalProperties: false,
+  properties: {
+    schemaVersion: { type: 'string', pattern: '^\\d+\\.\\d+\\.\\d+$' },
+    builderVersion: { type: 'string' },
+    projectId: { type: 'string' },
+    moduleId: { type: 'string' },
+    createdAt: { type: 'string' },
+    updatedAt: { type: 'string' },
+    id: { type: 'string' },
+    authNavigation: {
+      type: 'object',
+      required: [
+        'enabled',
+        'guestEntry',
+        'authenticatedEntry',
+        'afterLogin',
+        'afterRegistration',
+        'afterLogout',
+      ],
+      additionalProperties: false,
+      properties: {
+        enabled: { type: 'boolean' },
+        guestEntry: { type: 'string', minLength: 1 },
+        authenticatedEntry: { type: 'string', minLength: 1 },
+        afterLogin: { type: 'string', minLength: 1 },
+        afterRegistration: { type: 'string', minLength: 1 },
+        afterLogout: { type: 'string', minLength: 1 },
+        verificationRoute: { type: 'string' },
+        accessDeniedRoute: { type: 'string' },
+        sessionExpiredRoute: { type: 'string' },
+        accountSuspendedRoute: { type: 'string' },
+        roleRouteGroups: {
+          type: 'object',
+          additionalProperties: { type: 'string' },
+        },
+        events: {
+          type: 'object',
+          additionalProperties: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              targetRoute: { type: 'string' },
+              flowRef: { type: 'string' },
+              action: {
+                type: 'string',
+                enum: [
+                  'navigate',
+                  'replace',
+                  'reset',
+                  'restore-intended-destination',
+                  'hold',
+                ],
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+} as const;

@@ -1,0 +1,204 @@
+{
+  "schemaVersion": "1.0.0",
+  "builderVersion": "1.0.0",
+  "projectId": "expo-complete-commerce-foundation",
+  "moduleId": "navigation.commerce",
+  "id": "application.navigation",
+  "platforms": {
+    "ios": {
+      "renderer": "expo-ui",
+      "strictNative": true
+    },
+    "android": {
+      "renderer": "auto",
+      "fallback": "expo-router"
+    }
+  },
+  "rootNavigator": "root.stack",
+  "navigators": [
+    {
+      "id": "root.stack",
+      "type": "stack",
+      "initialRoute": "auth.stack",
+      "children": [
+        "auth.stack",
+        "app.tabs",
+        "admin.dashboard",
+        "auth.access-denied"
+      ]
+    },
+    {
+      "id": "auth.stack",
+      "type": "stack",
+      "initialRoute": "auth.login",
+      "children": [
+        "auth.login",
+        "auth.register",
+        "auth.verify"
+      ]
+    },
+    {
+      "id": "app.tabs",
+      "type": "tabs",
+      "tabsOptions": {
+        "initialTab": "tab.home.stack",
+        "preserveTabState": true,
+        "tabs": [
+          { "routeId": "tab.home.stack", "label": "Home", "icon": "house.fill" },
+          { "routeId": "tab.search.stack", "label": "Search", "icon": "magnifyingglass" },
+          { "routeId": "tab.profile.stack", "label": "Profile", "icon": "person.fill" }
+        ]
+      },
+      "children": [
+        "tab.home.stack",
+        "tab.search.stack",
+        "tab.profile.stack"
+      ]
+    },
+    {
+      "id": "tab.home.stack",
+      "type": "stack",
+      "initialRoute": "app.home",
+      "children": [
+        "app.home",
+        "app.orders.detail",
+        "app.notifications"
+      ]
+    },
+    {
+      "id": "tab.search.stack",
+      "type": "stack",
+      "initialRoute": "app.search",
+      "children": [
+        "app.search",
+        "app.products.detail"
+      ]
+    },
+    {
+      "id": "tab.profile.stack",
+      "type": "stack",
+      "initialRoute": "app.profile",
+      "children": [
+        "app.profile",
+        "app.settings"
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "id": "auth.login",
+      "path": "/login",
+      "screenRef": "screen.auth.login",
+      "navigatorId": "auth.stack",
+      "access": "guest",
+      "options": { "title": "Sign In", "headerShown": false }
+    },
+    {
+      "id": "auth.register",
+      "path": "/register",
+      "screenRef": "screen.auth.register",
+      "navigatorId": "auth.stack",
+      "access": "guest",
+      "options": { "title": "Create Account" }
+    },
+    {
+      "id": "auth.verify",
+      "path": "/verify",
+      "screenRef": "screen.auth.verify",
+      "navigatorId": "auth.stack",
+      "access": "public",
+      "options": { "title": "Verify Email" }
+    },
+    {
+      "id": "auth.access-denied",
+      "path": "/access-denied",
+      "screenRef": "screen.auth.access-denied",
+      "navigatorId": "root.stack",
+      "access": "public",
+      "options": { "title": "Access Denied" }
+    },
+    {
+      "id": "app.home",
+      "path": "/",
+      "screenRef": "screen.app.home",
+      "navigatorId": "tab.home.stack",
+      "access": "authenticated",
+      "options": { "title": "Home" }
+    },
+    {
+      "id": "app.orders.detail",
+      "path": "/orders/:orderId",
+      "screenRef": "screen.app.order-detail",
+      "navigatorId": "tab.home.stack",
+      "access": "authenticated",
+      "params": {
+        "orderId": { "type": "string", "required": true, "source": "path" }
+      },
+      "deepLink": {
+        "enabled": true,
+        "universalLink": true
+      },
+      "options": { "title": "Order Details" }
+    },
+    {
+      "id": "app.notifications",
+      "path": "/notifications",
+      "screenRef": "screen.app.notifications",
+      "navigatorId": "tab.home.stack",
+      "access": "authenticated",
+      "options": { "title": "Notifications" }
+    },
+    {
+      "id": "app.search",
+      "path": "/search",
+      "screenRef": "screen.app.search",
+      "navigatorId": "tab.search.stack",
+      "access": "authenticated",
+      "options": { "title": "Search" }
+    },
+    {
+      "id": "app.products.detail",
+      "path": "/products/:productId",
+      "screenRef": "screen.app.product-detail",
+      "navigatorId": "tab.search.stack",
+      "access": "authenticated",
+      "params": {
+        "productId": { "type": "string", "required": true, "source": "path" }
+      },
+      "options": { "title": "Product Detail" }
+    },
+    {
+      "id": "app.profile",
+      "path": "/profile",
+      "screenRef": "screen.app.profile",
+      "navigatorId": "tab.profile.stack",
+      "access": "authenticated",
+      "options": { "title": "Profile" }
+    },
+    {
+      "id": "app.settings",
+      "path": "/settings",
+      "screenRef": "screen.app.settings",
+      "navigatorId": "tab.profile.stack",
+      "access": "verified",
+      "options": { "title": "Account Settings" }
+    },
+    {
+      "id": "admin.dashboard",
+      "path": "/admin",
+      "screenRef": "screen.admin.dashboard",
+      "navigatorId": "root.stack",
+      "access": {
+        "roles": ["admin"],
+        "mode": "any"
+      },
+      "options": { "title": "Admin Dashboard" }
+    }
+  ],
+  "linking": {
+    "scheme": "expofoundation",
+    "hosts": ["example.com", "app.example.com"],
+    "universalLinks": true,
+    "androidAppLinks": true
+  }
+}

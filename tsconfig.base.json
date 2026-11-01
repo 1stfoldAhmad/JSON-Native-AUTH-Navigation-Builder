@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "jsx": "react-jsx",
+    "baseUrl": ".",
+    "paths": {
+      "@expo-foundation/contracts": ["./packages/contracts/src/index.ts"],
+      "@expo-foundation/core": ["./packages/core/src/index.ts"],
+      "@expo-foundation/auth": ["./packages/auth/src/index.ts"],
+      "@expo-foundation/navigation": ["./packages/navigation/src/index.ts"],
+      "@expo-foundation/integration": ["./packages/integration/src/index.ts"],
+      "@expo-foundation/expo-generator": ["./packages/expo-generator/src/index.ts"]
+    }
+  }
+}

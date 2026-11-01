@@ -1,0 +1,22 @@
+{
+  "name": "@expo-foundation/core",
+  "version": "1.0.0",
+  "description": "Shared Core: JSON Schemas, Canonical Types, IR, Validation, Capability Registry, and Compiler Pipeline",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types/index.ts",
+    "./schema": "./src/schema/index.ts",
+    "./ir": "./src/ir/index.ts",
+    "./capability-registry": "./src/capability-registry/index.ts",
+    "./validation": "./src/validation/index.ts",
+    "./compiler": "./src/compiler/index.ts"
+  },
+  "dependencies": {
+    "@expo-foundation/contracts": "*",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  }
+}

@@ -1,0 +1,88 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "poc.navigation",
+  "platforms": {
+    "ios": {
+      "renderer": "expo-ui",
+      "strictNative": true
+    },
+    "android": {
+      "renderer": "auto",
+      "fallback": "expo-router"
+    }
+  },
+  "rootNavigator": "root.stack",
+  "navigators": [
+    {
+      "id": "root.stack",
+      "type": "stack",
+      "initialRoute": "app.tabs",
+      "children": ["app.tabs"]
+    },
+    {
+      "id": "app.tabs",
+      "type": "tabs",
+      "tabsOptions": {
+        "initialTab": "tab.home.stack",
+        "preserveTabState": true,
+        "tabs": [
+          { "routeId": "tab.home.stack", "label": "Home", "icon": "house.fill" },
+          { "routeId": "tab.search.stack", "label": "Search", "icon": "magnifyingglass" }
+        ]
+      },
+      "children": ["tab.home.stack", "tab.search.stack"]
+    },
+    {
+      "id": "tab.home.stack",
+      "type": "stack",
+      "initialRoute": "app.home",
+      "children": ["app.home", "app.orders.detail"]
+    },
+    {
+      "id": "tab.search.stack",
+      "type": "stack",
+      "initialRoute": "app.search",
+      "children": ["app.search", "app.products.detail"]
+    }
+  ],
+  "routes": [
+    {
+      "id": "app.home",
+      "path": "/",
+      "screenRef": "screen.app.home",
+      "navigatorId": "tab.home.stack",
+      "access": "public"
+    },
+    {
+      "id": "app.orders.detail",
+      "path": "/orders/:orderId",
+      "screenRef": "screen.app.order-detail",
+      "navigatorId": "tab.home.stack",
+      "access": "public",
+      "params": {
+        "orderId": { "type": "string", "required": true, "source": "path" }
+      }
+    },
+    {
+      "id": "app.search",
+      "path": "/search",
+      "screenRef": "screen.app.search",
+      "navigatorId": "tab.search.stack",
+      "access": "public"
+    },
+    {
+      "id": "app.products.detail",
+      "path": "/products/:productId",
+      "screenRef": "screen.app.product-detail",
+      "navigatorId": "tab.search.stack",
+      "access": "public",
+      "params": {
+        "productId": { "type": "string", "required": true, "source": "path" }
+      }
+    }
+  ],
+  "linking": {
+    "scheme": "expofoundation",
+    "hosts": ["example.com"]
+  }
+}

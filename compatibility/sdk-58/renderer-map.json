@@ -1,0 +1,96 @@
+{
+  "sdkVersion": 58,
+  "renderers": {
+    "ios": {
+      "defaultMode": "strict-native",
+      "engine": "expo-ui-swiftui",
+      "routerIntegration": {
+        "factory": "createStandardRouterNavigator",
+        "bridge": "integrateWithRouter"
+      },
+      "navigators": {
+        "stack": {
+          "capabilityId": "navigation.stack",
+          "component": "NavigationStack",
+          "importPath": "@expo/ui/swift-ui",
+          "adapterModule": "renderers/ios/NativeStack.ios.tsx",
+          "supportsControlledPath": true,
+          "supportsInteractiveSwipeBack": true
+        },
+        "tabs": {
+          "capabilityId": "navigation.tabs",
+          "component": "TabView",
+          "importPath": "@expo/ui/swift-ui",
+          "adapterModule": "renderers/ios/NativeTabs.ios.tsx",
+          "preservesPerTabStackState": true
+        },
+        "split": {
+          "capabilityId": "navigation.split",
+          "component": "NavigationSplitView",
+          "importPath": "@expo/ui/swift-ui",
+          "adapterModule": "renderers/ios/NativeSplitView.ios.tsx"
+        },
+        "drawer": {
+          "capabilityId": "navigation.drawer",
+          "component": "NavigationSplitView",
+          "importPath": "@expo/ui/swift-ui",
+          "adapterModule": "renderers/ios/NativeSplitView.ios.tsx"
+        },
+        "modal": {
+          "capabilityId": "navigation.modal",
+          "component": "BottomSheet",
+          "importPath": "@expo/ui/swift-ui",
+          "adapterModule": "renderers/ios/NativeStack.ios.tsx"
+        }
+      }
+    },
+    "android": {
+      "defaultMode": "automatic-fallback",
+      "engine": "expo-ui-compose-router-hybrid",
+      "routerIntegration": {
+        "factory": "createStandardRouterNavigator",
+        "bridge": "expo-router"
+      },
+      "navigators": {
+        "stack": {
+          "capabilityId": "navigation.stack",
+          "component": "Stack",
+          "importPath": "expo-router",
+          "uiChromeComponent": "TopAppBar",
+          "uiChromeImportPath": "@expo/ui/jetpack-compose",
+          "adapterModule": "renderers/android/NativeStack.android.tsx",
+          "supportsHardwareBack": true
+        },
+        "tabs": {
+          "capabilityId": "navigation.tabs",
+          "component": "NavigationBar",
+          "importPath": "@expo/ui/jetpack-compose",
+          "routerComponent": "TabRouter",
+          "fallbackComponent": "NativeTabs",
+          "fallbackImportPath": "expo-router/unstable-native-tabs",
+          "adapterModule": "renderers/android/NativeTabs.android.tsx",
+          "preservesPerTabStackState": true
+        },
+        "drawer": {
+          "capabilityId": "navigation.drawer",
+          "component": "Drawer",
+          "importPath": "expo-router/drawer",
+          "adapterModule": "renderers/android/NativeDrawer.android.tsx"
+        },
+        "split": {
+          "capabilityId": "navigation.split",
+          "component": "Drawer",
+          "importPath": "expo-router/drawer",
+          "adapterModule": "renderers/android/NativeDrawer.android.tsx"
+        },
+        "modal": {
+          "capabilityId": "navigation.modal",
+          "component": "ModalBottomSheet",
+          "importPath": "@expo/ui/jetpack-compose",
+          "routerComponent": "Stack.Screen",
+          "adapterModule": "renderers/android/NativeStack.android.tsx"
+        }
+      }
+    }
+  }
+}
