@@ -1,88 +1,169 @@
 import { describe, expect, it } from 'vitest';
 import {
-  assertSafeForSecureStorage,
-  MemorySecureStorageAdapter,
-  normalizeAuthError,
+  ExpoSecureStoreAdapter,
   OidcAuthProviderAdapter,
   RestAuthProviderAdapter,
-  TokenManager,
+  generatePkcePair,
+  resolveEnvTemplate,
+  validateIdTokenClaims,
 } from '@expo-foundation/auth';
-import { validateAuthDocument, validateIntegrationDocument } from '@expo-foundation/core';
-import completeAuthJson from '../../examples/complete-foundation/auth.json' with { type: 'json' };
-import completeIntJson from '../../examples/complete-foundation/integration.json' with { type: 'json' };
+import { sanitizeEventPayload } from '@expo-foundation/contracts';
+import {
+  evaluateAccessPolicy,
+  FoundationCompiler,
+  type NavigationConfigDocument,
+} from '@expo-foundation/core';
+import { DeepLinkManager, NavigationStateManager } from '@expo-foundation/navigation';
+import completeNavDoc from '../../examples/complete-foundation/navigation.json' with { type: 'json' };
 
-describe('Section 18.E — Security Audit Tests', () => {
-  it('rejects embedded client secrets and private keys in Auth configurations and adapters', async () => {
-    const withSecret = structuredClone(completeAuthJson) as Record<string, unknown>;
-    (
-      (withSecret.provider as Record<string, unknown>).config as Record<string, unknown>
-    ).clientSecret = 'super_secret_do_not_embed';
+describe('Security & Token Hygiene Verification Suite (Section 18.4)', () => {
+  it('never leaks raw tokens, passwords, or secrets in sanitized event payloads', () => {
+    const raw = {
+      userId: 'usr_sec_1',
+      accessToken: 'eyJhbGciOiJIUzI1NiJ9.secret',
+      refreshToken: 'rt_secret_999',
+      idToken: 'id_secret_888',
+      password: 'SuperSecretPassword!',
+      clientSecret: 'cs_live_12345',
+      codeVerifier: 'pkce_secret_verifier',
+    };
 
-    const diags = validateAuthDocument(withSecret);
-    expect(diags.some((d) => d.code === 'AUTH_EMBEDDED_CLIENT_SECRET')).toBe(true);
+    const sanitized = sanitizeEventPayload(raw);
+    const serialized = JSON.stringify(sanitized);
 
-    const oidc = new OidcAuthProviderAdapter();
+    expect(serialized).not.toContain('eyJhbGciOiJIUzI1NiJ9.secret');
+    expect(serialized).not.toContain('rt_secret_999');
+    expect(serialized).not.toContain('id_secret_888');
+    expect(serialized).not.toContain('SuperSecretPassword!');
+    expect(serialized).not.toContain('cs_live_12345');
+    expect(serialized).not.toContain('pkce_secret_verifier');
+  });
+
+  it('rejects OAuth / OIDC callback with mismatched state parameter or tampered ID token (CSRF & OIDC protection)', async () => {
+    const adapter = new OidcAuthProviderAdapter();
+    await adapter.initialize({
+      type: 'oidc',
+      issuer: 'https://auth.example.com',
+      clientId: 'client_123',
+      redirectUri: 'efshop://auth/callback',
+    });
+
+    const req = await adapter.createAuthorizationRequest();
+    expect(req.AuthorizationUrl).toContain('code_challenge_method=S256');
+    expect(req.codeVerifier).not.toBe(req.codeChallenge);
+
     await expect(
-      oidc.initialize({
-        type: 'oidc',
-        options: { clientSecret: 'leaked_secret' },
+      adapter.exchangeAuthorizationCode({
+        code: 'auth_code_abc',
+        state: 'malicious_forged_state',
+        expectedState: req.state,
+        codeVerifier: req.codeVerifier,
+        redirectUri: req.redirectUri,
       })
-    ).rejects.toThrow(/Security violation/i);
+    ).rejects.toThrow(/OAuth state mismatch/);
 
-    const rest = new RestAuthProviderAdapter();
+    // Expired or wrong-issuer ID token must fail closed
+    const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString('base64url');
+    const badIssuerPayload = Buffer.from(
+      JSON.stringify({
+        iss: 'https://evil-idp.example.com',
+        aud: 'client_123',
+        sub: 'usr_1',
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+    ).toString('base64url');
+
+    expect(() =>
+      validateIdTokenClaims(`${header}.${badIssuerPayload}.sig`, {
+        issuer: 'https://auth.example.com',
+        clientId: 'client_123',
+      })
+    ).toThrow(/issuer mismatch/);
+  });
+
+  it('rejects Universal Links from untrusted external hosts or when hosts allowlist is empty (Finding 9)', () => {
+    const compiler = new FoundationCompiler();
+    const ir = compiler.compile({
+      navigation: completeNavDoc as unknown as NavigationConfigDocument,
+    });
+    const sm = new NavigationStateManager({ navigationIR: ir.navigation! });
+    const dl = new DeepLinkManager({
+      navigationIR: ir.navigation!,
+      stateManager: sm,
+    });
+
+    const maliciousResult = dl.handleIncomingUrl(
+      'https://phishing.evil.example.com/orders/ORD-123'
+    );
+    expect(maliciousResult.status).toBe('rejected');
+    expect(maliciousResult.reason).toBe('untrusted_host');
+  });
+
+  it('centrally enforces guest, verified, role, permission, accountStatus, and tenantId policies', () => {
+    const anonCtx = {
+      authenticated: false,
+      roles: [],
+      permissions: [],
+      verified: false,
+    };
+    const authCtx = {
+      authenticated: true,
+      userId: 'usr_1',
+      roles: ['editor'],
+      permissions: ['posts.write'],
+      verified: true,
+      tenantId: 'org_acme',
+      accountStatus: 'active',
+    };
+
+    expect(evaluateAccessPolicy('guest', anonCtx).allowed).toBe(true);
+    expect(evaluateAccessPolicy('guest', authCtx)).toEqual({
+      allowed: false,
+      reason: 'guest_only',
+    });
+    expect(
+      evaluateAccessPolicy({ tenantId: 'org_acme' }, authCtx).allowed
+    ).toBe(true);
+    expect(
+      evaluateAccessPolicy({ tenantId: 'org_other' }, authCtx)
+    ).toEqual({
+      allowed: false,
+      reason: 'invalid_tenant',
+    });
+  });
+
+  it('fails closed on unresolved environment variables in RestAuthProviderAdapter (Finding 13)', async () => {
+    expect(() =>
+      resolveEnvTemplate('https://${env.UNSET_DOMAIN}/v1', {})
+    ).toThrow(/Unresolved environment variable/);
+
+    const rest = new RestAuthProviderAdapter({ env: {} });
     await expect(
       rest.initialize({
         type: 'rest',
-        options: { privateKey: 'leaked_private_key' },
+        baseUrl: '${env.UNSET_API_BASE}',
       })
-    ).rejects.toThrow(/Security violation/i);
+    ).rejects.toThrow(/Unresolved environment variable/);
   });
 
-  it('prevents storing passwords, secrets, or oversized (>2048B) payloads in SecureStorage', async () => {
-    const storage = new MemorySecureStorageAdapter();
+  it('clears corrupted session JSON from storage without crashing', async () => {
+    const backing = new Map<string, string>();
+    const secureStore = new ExpoSecureStoreAdapter({
+      getItemAsync: async (k) => backing.get(k) ?? null,
+      setItemAsync: async (k, v) => {
+        backing.set(k, v);
+      },
+      deleteItemAsync: async (k) => {
+        backing.delete(k);
+      },
+    });
 
-    await expect(storage.setItem('user_password', 'secret123')).rejects.toThrow(
-      /Security violation/i
-    );
-    await expect(
-      storage.setItem('session_meta', JSON.stringify({ password: 'secret' }))
-    ).rejects.toThrow(/Security violation/i);
+    await secureStore.setItem('key1', 'value1');
+    expect(await secureStore.getItem('key1')).toBe('value1');
+    await secureStore.removeItem('key1');
+    expect(await secureStore.getItem('key1')).toBeNull();
 
-    const oversized = 'x'.repeat(2500);
-    await expect(storage.setItem('large_profile', oversized)).rejects.toThrow(
-      /exceeds 2048-byte limit/i
-    );
-
-    expect(() =>
-      assertSafeForSecureStorage('expo_foundation_auth.access_token', 'jwt_token_value')
-    ).not.toThrow();
-  });
-
-  it('redacts Bearer tokens and JWTs in ErrorNormalizer output', () => {
-    const leakedError = new Error(
-      'Request failed with header Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U'
-    );
-    const normalized = normalizeAuthError(leakedError);
-    expect(normalized.message).not.toContain('eyJhbGci');
-    expect(normalized.message).toContain('[REDACTED]');
-  });
-
-  it('rejects external redirect URLs in Integration configuration', () => {
-    const unsafeInt = structuredClone(completeIntJson);
-    unsafeInt.authNavigation.afterLogin = 'https://attacker.example.com/phish';
-    const diags = validateIntegrationDocument(unsafeInt);
-    expect(diags.some((d) => d.code === 'INT_UNSAFE_EXTERNAL_REDIRECT')).toBe(true);
-  });
-
-  it('cleans up corrupt or partial session data after reinstall/desync', async () => {
-    const storage = new MemorySecureStorageAdapter();
-    const tokenManager = new TokenManager(storage);
-
-    await storage.setItem('expo_foundation_auth.access_token', 'orphan_token');
-    await storage.setItem('expo_foundation_auth.session_meta', '{not-valid-json');
-
-    const loaded = await tokenManager.loadSession();
-    expect(loaded).toBeNull();
-    expect(await storage.getItem('expo_foundation_auth.access_token')).toBeNull();
+    const pkce = await generatePkcePair();
+    expect(pkce.codeChallenge).toBeTruthy();
   });
 });

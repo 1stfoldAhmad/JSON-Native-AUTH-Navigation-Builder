@@ -7,9 +7,9 @@
       "support": "native",
       "minimumSdk": 58,
       "requiredPackages": ["@expo/ui", "expo-router"],
-      "implementation": "@expo/ui/swift-ui#NavigationStack",
+      "implementation": "@expo/ui/swift-ui#Host+NavigationStack",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.stack",
@@ -22,7 +22,7 @@
       "limitations": [
         "Expo UI Android SDK 58 does not include a Compose NavHost/NavigationStack; Expo Router Stack provides native route management."
       ],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.nested-stack",
@@ -30,9 +30,9 @@
       "support": "native",
       "minimumSdk": 58,
       "requiredPackages": ["@expo/ui", "expo-router"],
-      "implementation": "@expo/ui/swift-ui#NavigationStack",
+      "implementation": "@expo/ui/swift-ui#Host+NavigationStack",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.nested-stack",
@@ -43,7 +43,7 @@
       "implementation": "expo-router#Stack",
       "fallback": "expo-router#Stack",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.link",
@@ -53,7 +53,7 @@
       "requiredPackages": ["@expo/ui"],
       "implementation": "@expo/ui/swift-ui#NavigationLink",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "documented"
     },
     {
       "id": "navigation.link",
@@ -66,7 +66,7 @@
       "limitations": [
         "Native Compose NavigationLink is not in Expo UI Android catalogue; uses Expo Router Link."
       ],
-      "verificationStatus": "verified"
+      "verificationStatus": "documented"
     },
     {
       "id": "navigation.destination",
@@ -76,7 +76,7 @@
       "requiredPackages": ["@expo/ui"],
       "implementation": "@expo/ui/swift-ui#NavigationDestination",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.destination",
@@ -89,7 +89,7 @@
       "limitations": [
         "Destination registration on Android is managed by Expo Router route descriptors."
       ],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.tabs",
@@ -97,12 +97,12 @@
       "support": "native",
       "minimumSdk": 58,
       "requiredPackages": ["@expo/ui", "expo-router"],
-      "implementation": "@expo/ui/swift-ui#TabView+createStandardRouterNavigator",
-      "fallback": "expo-router/unstable-native-tabs#NativeTabs",
+      "implementation": "@expo/ui/swift-ui#Host+TabView+createStandardRouterNavigator",
+      "fallback": "expo-router/native-tabs#NativeTabs",
       "limitations": [
-        "Requires custom TabRouter synchronization via createStandardRouterNavigator to preserve per-tab stack history."
+        "Requires custom TabRouter synchronization via createStandardRouterNavigator(TabsNavigatorContent, TabRouter) to preserve per-tab stack history."
       ],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.tabs",
@@ -110,12 +110,12 @@
       "support": "supported",
       "minimumSdk": 58,
       "requiredPackages": ["@expo/ui", "expo-router"],
-      "implementation": "@expo/ui/jetpack-compose#NavigationBar+expo-router#TabRouter",
-      "fallback": "expo-router#NativeTabs",
+      "implementation": "@expo/ui/jetpack-compose#Host+NavigationBar+NavigationBarItem+expo-router#TabRouter",
+      "fallback": "expo-router/native-tabs#NativeTabs",
       "limitations": [
-        "Compose NavigationBar is a UI bar component paired with Expo Router TabRouter; falls back to Expo Router NativeTabs if needed."
+        "Compose NavigationBar is a UI bar component paired with Expo Router TabRouter; falls back to expo-router/native-tabs NativeTabs if needed."
       ],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.split",
@@ -123,9 +123,9 @@
       "support": "native",
       "minimumSdk": 58,
       "requiredPackages": ["@expo/ui", "expo-router"],
-      "implementation": "@expo/ui/swift-ui#NavigationSplitView",
+      "implementation": "@expo/ui/swift-ui#Host+NavigationSplitView",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "documented"
     },
     {
       "id": "navigation.split",
@@ -134,11 +134,11 @@
       "minimumSdk": 58,
       "requiredPackages": ["expo-router"],
       "implementation": "expo-router#AdaptiveSplitNavigator",
-      "fallback": "expo-router#Drawer",
+      "fallback": "expo-router/drawer#Drawer",
       "limitations": [
         "NavigationSplitView has no direct equivalent in Expo UI Android catalogue; uses adaptive Router layout or Drawer fallback."
       ],
-      "verificationStatus": "verified"
+      "verificationStatus": "documented"
     },
     {
       "id": "navigation.drawer",
@@ -146,11 +146,11 @@
       "support": "native",
       "minimumSdk": 58,
       "requiredPackages": ["@expo/ui", "expo-router"],
-      "implementation": "@expo/ui/swift-ui#NavigationSplitView",
+      "implementation": "@expo/ui/swift-ui#Host+NavigationSplitView",
       "limitations": [
         "On iOS, sidebar navigation uses SwiftUI NavigationSplitView per Apple HIG."
       ],
-      "verificationStatus": "verified"
+      "verificationStatus": "documented"
     },
     {
       "id": "navigation.drawer",
@@ -161,7 +161,7 @@
       "implementation": "expo-router/drawer#Drawer",
       "fallback": "expo-router/drawer#Drawer",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "documented"
     },
     {
       "id": "navigation.toolbar",
@@ -171,7 +171,7 @@
       "requiredPackages": ["@expo/ui"],
       "implementation": "@expo/ui/swift-ui#Toolbar",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "documented"
     },
     {
       "id": "navigation.toolbar",
@@ -179,9 +179,9 @@
       "support": "native",
       "minimumSdk": 58,
       "requiredPackages": ["@expo/ui"],
-      "implementation": "@expo/ui/jetpack-compose#TopAppBar",
+      "implementation": "@expo/ui/jetpack-compose#Host+TopAppBar",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "documented"
     },
     {
       "id": "navigation.modal",
@@ -189,9 +189,9 @@
       "support": "native",
       "minimumSdk": 58,
       "requiredPackages": ["@expo/ui", "expo-router"],
-      "implementation": "@expo/ui/swift-ui#BottomSheet",
+      "implementation": "@expo/ui/swift-ui#Host+BottomSheet",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.modal",
@@ -199,10 +199,10 @@
       "support": "native",
       "minimumSdk": 58,
       "requiredPackages": ["@expo/ui", "expo-router"],
-      "implementation": "@expo/ui/jetpack-compose#ModalBottomSheet+expo-router#ModalRoute",
+      "implementation": "@expo/ui/jetpack-compose#Host+ModalBottomSheet+expo-router#ModalRoute",
       "fallback": "expo-router#ModalRoute",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.fullscreen-modal",
@@ -212,7 +212,7 @@
       "requiredPackages": ["@expo/ui", "expo-router"],
       "implementation": "@expo/ui/swift-ui#fullScreenCover",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "documented"
     },
     {
       "id": "navigation.fullscreen-modal",
@@ -223,7 +223,7 @@
       "implementation": "expo-router#StackModal",
       "fallback": "expo-router#StackModal",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "documented"
     },
     {
       "id": "navigation.deep-links",
@@ -233,7 +233,7 @@
       "requiredPackages": ["expo-router", "expo-linking"],
       "implementation": "expo-router#integrateWithRouter+expo-linking",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     },
     {
       "id": "navigation.deep-links",
@@ -243,7 +243,7 @@
       "requiredPackages": ["expo-router", "expo-linking"],
       "implementation": "expo-router+expo-linking",
       "limitations": [],
-      "verificationStatus": "verified"
+      "verificationStatus": "simulated"
     }
   ]
 }

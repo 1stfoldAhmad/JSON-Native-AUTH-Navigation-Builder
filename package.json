@@ -2,34 +2,40 @@
   "name": "expo-app-foundation",
   "version": "1.0.0",
   "private": true,
-  "description": "Reusable JSON-Driven Expo Auth Builder & Native Navigation Builder (Expo SDK 58)",
+  "description": "Reusable JSON-Driven Expo Auth Builder & Native Navigation Builder for Expo SDK 58",
   "type": "module",
   "workspaces": [
     "packages/*",
     "apps/*"
   ],
   "scripts": {
-    "build": "tsc -b packages/contracts packages/core packages/auth packages/navigation packages/integration packages/expo-generator",
-    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && npm run build:builder",
+    "build:builder": "vite build --config apps/builder/vite.config.ts apps/builder",
+    "dev:builder": "vite --config apps/builder/vite.config.ts apps/builder --host 0.0.0.0 --port 5173",
+    "preview:builder": "vite preview --config apps/builder/vite.config.ts apps/builder --host 0.0.0.0 --port 5173",
     "test": "vitest run",
-    "test:watch": "vitest",
-    "dev:builder": "npm --workspace @expo-foundation/builder run dev",
-    "build:builder": "npm --workspace @expo-foundation/builder run build"
+    "test:unit": "vitest run tests/unit",
+    "test:compiler": "vitest run tests/compiler",
+    "test:integration": "vitest run tests/integration",
+    "test:security": "vitest run tests/security",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "clean": "node scripts/clean.mjs"
   },
   "dependencies": {
     "ajv": "^8.17.1",
-    "ajv-formats": "^3.0.1"
+    "ajv-formats": "^3.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "typescript": "^5.7.2",
-    "vite": "^6.0.5",
-    "vitest": "^2.1.8"
+    "typescript": "^5.8.2",
+    "vite": "^6.2.0",
+    "vitest": "^3.0.7"
   },
   "engines": {
     "node": ">=20.0.0"

@@ -21,7 +21,8 @@
       "@expo-foundation/auth": ["./packages/auth/src/index.ts"],
       "@expo-foundation/navigation": ["./packages/navigation/src/index.ts"],
       "@expo-foundation/integration": ["./packages/integration/src/index.ts"],
-      "@expo-foundation/expo-generator": ["./packages/expo-generator/src/index.ts"]
+      "@expo-foundation/expo-generator": ["./packages/expo-generator/src/index.ts"],
+      "@expo-foundation/testing": ["./packages/testing/src/index.ts"]
     }
   }
 }

@@ -4,49 +4,43 @@ import type {
   NavigationConfigDocument,
 } from '@expo-foundation/core';
 
-import completeAuthJson from '../../../examples/complete-foundation/auth.json' with { type: 'json' };
-import completeNavJson from '../../../examples/complete-foundation/navigation.json' with { type: 'json' };
-import completeIntJson from '../../../examples/complete-foundation/integration.json' with { type: 'json' };
-import authOnlyJson from '../../../examples/auth-only/auth.json' with { type: 'json' };
-import navOnlyJson from '../../../examples/navigation-only/navigation.json' with { type: 'json' };
-
-export type BuilderPresetId = 'complete' | 'auth-only' | 'navigation-only';
+import completeAuth from '../../../examples/complete-foundation/auth.json' with { type: 'json' };
+import completeNav from '../../../examples/complete-foundation/navigation.json' with { type: 'json' };
+import completeInt from '../../../examples/complete-foundation/integration.json' with { type: 'json' };
+import authOnly from '../../../examples/auth-only/auth.json' with { type: 'json' };
+import navOnly from '../../../examples/navigation-only/navigation.json' with { type: 'json' };
 
 export interface BuilderPreset {
-  id: BuilderPresetId;
+  id: string;
   label: string;
   description: string;
-  auth: AuthConfigDocument | null;
-  navigation: NavigationConfigDocument | null;
-  integration: IntegrationConfigDocument | null;
+  auth?: AuthConfigDocument;
+  navigation?: NavigationConfigDocument;
+  integration?: IntegrationConfigDocument;
 }
 
-export const BUILDER_PRESETS: Record<BuilderPresetId, BuilderPreset> = {
-  complete: {
-    id: 'complete',
-    label: 'Complete Foundation (Auth + Navigation + Integration)',
+export const BUILDER_PRESETS: BuilderPreset[] = [
+  {
+    id: 'complete-foundation',
+    label: 'Complete E-Commerce Auth + Navigation',
     description:
-      'Full commerce application with REST Auth, iOS SwiftUI NavigationStack/TabView, Android Compose/Router hybrid, and protected deep links.',
-    auth: structuredClone(completeAuthJson) as unknown as AuthConfigDocument,
-    navigation: structuredClone(completeNavJson) as unknown as NavigationConfigDocument,
-    integration: structuredClone(completeIntJson) as unknown as IntegrationConfigDocument,
+      'Full REST Auth + SwiftUI/Compose Nested Stacks & Tabs + Deferred Deep Link Integration',
+    auth: completeAuth as unknown as AuthConfigDocument,
+    navigation: completeNav as unknown as NavigationConfigDocument,
+    integration: completeInt as unknown as IntegrationConfigDocument,
   },
-  'auth-only': {
+  {
     id: 'auth-only',
-    label: 'Auth-Only Mode (Standalone Headless Auth)',
+    label: 'Auth-Only Module (OIDC PKCE + MFA)',
     description:
-      'Executes the Auth Builder independently without any Navigation Builder dependency.',
-    auth: structuredClone(authOnlyJson) as unknown as AuthConfigDocument,
-    navigation: null,
-    integration: null,
+      'Standalone Auth Builder configuration with OIDC PKCE, Biometrics, and SecureStore',
+    auth: authOnly as unknown as AuthConfigDocument,
   },
-  'navigation-only': {
+  {
     id: 'navigation-only',
-    label: 'Navigation-Only Mode (Standalone Native Navigation)',
+    label: 'Navigation-Only Catalog (Tabs + Split View)',
     description:
-      'Executes the Navigation Builder independently for a public catalog app without Auth.',
-    auth: null,
-    navigation: structuredClone(navOnlyJson) as unknown as NavigationConfigDocument,
-    integration: null,
+      'Standalone Navigation Builder configuration with SwiftUI TabView & NavigationSplitView',
+    navigation: navOnly as unknown as NavigationConfigDocument,
   },
-};
+];

@@ -1,8 +1,9 @@
 /**
  * @expo-foundation/contracts - Auth Provider Adapter Contract
  *
- * Defines the provider-independent authentication adapter interface and optional
- * capability interfaces (OTP, MFA, OAuth/OIDC, Biometric, Passkeys, Multi-Account, Multi-Tenant).
+ * Defines the provider-independent authentication adapter interface, provider capability
+ * descriptors, and optional capability interfaces (OTP, MFA, OAuth/OIDC, Biometric, Passkeys,
+ * Multi-Account, Multi-Tenant).
  */
 
 export type AuthProviderType =
@@ -17,11 +18,25 @@ export type AuthProviderType =
   | 'clerk'
   | 'custom';
 
+export interface AuthProviderCapabilities {
+  passwordLogin: boolean;
+  registration: boolean;
+  passwordReset: boolean;
+  emailVerification: boolean;
+  phoneAuthentication: boolean;
+  otp: boolean;
+  oauth: boolean;
+  mfa: boolean;
+  biometric: boolean;
+}
+
 export interface AuthProviderConfig {
   type: AuthProviderType;
   ref?: string;
   baseUrl?: string;
   clientId?: string;
+  issuer?: string;
+  audience?: string;
   discoveryUrl?: string;
   redirectUri?: string;
   scopes?: string[];
@@ -56,7 +71,7 @@ export interface AuthUser {
   permissions?: string[];
   tenantId?: string;
   organizationIds?: string[];
-  accountStatus?: 'active' | 'unverified' | 'suspended' | 'locked' | string;
+  accountStatus?: 'active' | 'unverified' | 'suspended' | 'disabled' | 'locked' | string;
   claims?: Record<string, unknown>;
 }
 
@@ -85,6 +100,7 @@ export interface SignInInput {
   password?: string;
   provider?: string;
   tenantId?: string;
+  idempotencyKey?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -95,18 +111,21 @@ export interface SignUpInput {
   password?: string;
   displayName?: string;
   tenantId?: string;
+  idempotencyKey?: string;
   metadata?: Record<string, unknown>;
 }
 
 export interface PasswordResetRequest {
   email: string;
   redirectUrl?: string;
+  idempotencyKey?: string;
 }
 
 export interface PasswordResetInput {
   token: string;
   newPassword: string;
   email?: string;
+  idempotencyKey?: string;
 }
 
 export interface EmailVerificationInput {
@@ -129,17 +148,19 @@ export interface AuthResult {
     | 'verification_required'
     | 'challenge_required'
     | 'recovery_required'
-    | 'account_suspended';
+    | 'account_suspended'
+    | 'account_disabled';
   session?: AuthSession;
   user?: AuthUser;
   challenge?: AuthChallenge;
 }
 
 /**
- * Core AuthProviderAdapter interface (Section 4.2)
+ * Core AuthProviderAdapter interface (Section 4.2 & Section 14)
  */
 export interface AuthProviderAdapter {
   readonly providerType: AuthProviderType;
+  readonly capabilities?: AuthProviderCapabilities;
 
   initialize(config: AuthProviderConfig): Promise<void>;
 
@@ -170,6 +191,7 @@ export interface OtpRequest {
   channel: 'sms' | 'email';
   destination: string;
   purpose?: 'login' | 'verification' | 'reset';
+  idempotencyKey?: string;
 }
 
 export interface OtpVerification {
@@ -204,6 +226,7 @@ export interface MfaCapability {
 export interface OAuthAuthorizationRequest {
   AuthorizationUrl: string;
   state: string;
+  nonce: string;
   codeVerifier: string;
   codeChallenge: string;
   redirectUri: string;
@@ -213,6 +236,7 @@ export interface OAuthCodeExchangeInput {
   code: string;
   state: string;
   expectedState: string;
+  expectedNonce?: string;
   codeVerifier: string;
   redirectUri: string;
 }

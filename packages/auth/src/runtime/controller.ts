@@ -1,10 +1,24 @@
+/**
+ * @expo-foundation/auth - Runtime Auth Controller
+ *
+ * Implements Section 14.6, 14.7, 14.8, and Audit Findings 6, 12, 14, 15:
+ * - Defaults to `ExpoSecureStoreAdapter` unless `storage` is explicitly configured as `'memory'`
+ * - Deterministic lifecycle event emission (`emit` + `emitAsync`) with single-owner `flowRef`
+ *   deduplication via `eventBus.claimFlowDispatch(envelope.id, flowRef)`
+ * - Trusted authorization context (`AccessContext` with `issuedAt`): removes unverified local
+ *   role mutation and provides `refreshAccessContextFromServer()`
+ */
+
 import {
   FoundationEventBus,
   hasMfaCapability,
   hasOtpCapability,
   InMemoryFlowRegistry,
+  type AuthChallenge,
+  type AuthLifecycleEventName,
   type AuthProviderAdapter,
-  type AuthResult,
+  type AuthSession,
+  type AuthUser,
   type EmailVerificationInput,
   type FlowRegistry,
   type MfaVerifyInput,
@@ -15,304 +29,356 @@ import {
   type SignInInput,
   type SignUpInput,
 } from '@expo-foundation/contracts';
-import type { AccessContext, AuthIR } from '@expo-foundation/core';
+import type { AccessContext, AuthIR, AuthStatus } from '@expo-foundation/core';
+import { AuthProviderRegistry } from '../providers/provider-registry.js';
+import { SessionManager } from '../session-manager/index.js';
+import { AuthStateMachine } from '../state-machine/index.js';
 import {
-  AuthProviderRegistry,
-  defaultAuthProviderRegistry,
-} from '../providers/registry.js';
-import { AuthSessionManager } from '../session-manager/index.js';
-import { AuthStateMachine, type AuthMachineState } from '../state-machine/index.js';
-import {
-  MemorySecureStorageAdapter,
-  type SecureStorageAdapter,
+  ExpoSecureStoreAdapter,
+  InMemoryTokenStorage,
+  type TokenStorageAdapter,
 } from '../storage/index.js';
-import { buildAccessContext } from './access-context.js';
-import { normalizeAuthError } from './error-normalizer.js';
 
-export interface AuthControllerOptions {
-  authIR: AuthIR;
-  storage?: SecureStorageAdapter;
-  providerRegistry?: AuthProviderRegistry;
-  adapter?: AuthProviderAdapter;
-  eventBus?: FoundationEventBus;
-  flowRegistry?: FlowRegistry;
+export interface AuthRuntimeSnapshot {
+  status: AuthStatus;
+  user: AuthUser | null;
+  session: AuthSession | null;
+  challenge: AuthChallenge | null;
+  accessContext: AccessContext;
+  lastError: string | null;
 }
 
 export class AuthController {
-  readonly authIR: AuthIR;
-  readonly stateMachine: AuthStateMachine;
-  readonly sessionManager: AuthSessionManager;
-  readonly eventBus: FoundationEventBus;
-  readonly flowRegistry: FlowRegistry;
-  readonly adapter: AuthProviderAdapter;
-  private readonly providerRegistry: AuthProviderRegistry;
+  private readonly ir: AuthIR;
+  private readonly stateMachine: AuthStateMachine;
+  private readonly sessionManager: SessionManager;
+  private readonly adapter: AuthProviderAdapter;
+  private readonly eventBus: FoundationEventBus;
+  private readonly flowRegistry: FlowRegistry;
 
-  constructor(options: AuthControllerOptions) {
-    this.authIR = options.authIR;
+  private currentUser: AuthUser | null = null;
+  private currentSession: AuthSession | null = null;
+  private currentChallenge: AuthChallenge | null = null;
+  private accessContextIssuedAt: number | undefined;
+  private lastError: string | null = null;
+  private readonly stateListeners = new Set<(snapshot: AuthRuntimeSnapshot) => void>();
+
+  constructor(options: {
+    authIR: AuthIR;
+    adapter?: AuthProviderAdapter;
+    storage?: TokenStorageAdapter;
+    eventBus?: FoundationEventBus;
+    flowRegistry?: FlowRegistry;
+    providerRegistry?: AuthProviderRegistry;
+    now?: () => number;
+  }) {
+    this.ir = options.authIR;
     this.stateMachine = new AuthStateMachine('unknown');
-    this.sessionManager = new AuthSessionManager({
-      storage: options.storage ?? new MemorySecureStorageAdapter(),
-      refreshEnabled: options.authIR.sessionPolicy.refreshEnabled,
-      refreshThresholdSeconds: options.authIR.sessionPolicy.refreshThresholdSeconds,
-      rotateRefreshTokens: options.authIR.sessionPolicy.rotateRefreshTokens,
-      revokeOnLogout: options.authIR.sessionPolicy.revokeOnLogout,
-    });
     this.eventBus = options.eventBus ?? new FoundationEventBus();
     this.flowRegistry = options.flowRegistry ?? new InMemoryFlowRegistry();
-    this.providerRegistry = options.providerRegistry ?? defaultAuthProviderRegistry;
-    this.adapter =
-      options.adapter ??
-      this.providerRegistry.create(options.authIR.primaryProvider.type);
-  }
 
-  private findFlowRef(eventName: string): string | undefined {
-    const match = this.authIR.events.find(
-      (e) =>
-        e.emittedEvent === eventName ||
-        e.trigger === eventName ||
-        `auth.${e.trigger}` === eventName
-    );
-    return match?.flowRef;
-  }
+    const registry = options.providerRegistry ?? new AuthProviderRegistry();
+    this.adapter = options.adapter ?? registry.create(this.ir.providerType);
 
-  private async emitAuthEvent(
-    eventName: string,
-    payload: Record<string, unknown> = {}
-  ): Promise<void> {
-    const flowRef = this.findFlowRef(eventName);
-    this.eventBus.emit(eventName, payload, {
-      source: 'auth',
-      flowRef,
+    // Audit Finding 6: Default to ExpoSecureStoreAdapter unless 'memory' or custom storage is supplied
+    const storage: TokenStorageAdapter =
+      options.storage ??
+      (this.ir.session.storage === 'memory'
+        ? new InMemoryTokenStorage()
+        : new ExpoSecureStoreAdapter());
+
+    this.sessionManager = new SessionManager({
+      storage,
+      refreshEnabled: this.ir.session.refreshEnabled,
+      refreshThresholdSeconds: this.ir.session.refreshThresholdSeconds,
+      rotateRefreshTokens: this.ir.session.rotateRefreshTokens,
+      now: options.now,
     });
-    if (flowRef) {
-      await this.flowRegistry.dispatch(flowRef, eventName, payload);
-    }
   }
 
-  async initialize(): Promise<AuthMachineState> {
-    await this.adapter.initialize(this.authIR.primaryProvider.config);
-    if (this.authIR.sessionPolicy.restoreOnLaunch) {
+  async initialize(): Promise<AuthRuntimeSnapshot> {
+    await this.adapter.initialize(this.ir.providerConfig);
+
+    if (this.ir.session.restoreOnLaunch) {
       return this.restoreSession();
+    } else {
+      this.stateMachine.transition('RESTORE_START');
+      this.stateMachine.transition('RESTORE_EMPTY');
+      this.notifyStateChange();
+      return this.getSnapshot();
     }
-    this.stateMachine.transition({ type: 'SKIP_RESTORE' });
-    return this.stateMachine.getState();
   }
 
-  async restoreSession(now = Date.now()): Promise<AuthMachineState> {
-    this.stateMachine.transition({
-      type: 'RESTORE_START',
-      provider: this.adapter.providerType,
-    });
+  subscribe(listener: (snapshot: AuthRuntimeSnapshot) => void): () => void {
+    this.stateListeners.add(listener);
+    return () => {
+      this.stateListeners.delete(listener);
+    };
+  }
+
+  getSnapshot(): AuthRuntimeSnapshot {
+    return {
+      status: this.stateMachine.getStatus(),
+      user: this.currentUser,
+      session: this.currentSession,
+      challenge: this.currentChallenge,
+      accessContext: this.getAccessContext(),
+      lastError: this.lastError,
+    };
+  }
+
+  getAccessContext(): AccessContext {
+    const isAuthenticated =
+      this.stateMachine.getStatus() === 'authenticated' && this.currentUser !== null;
+
+    if (!isAuthenticated || !this.currentUser) {
+      return {
+        authenticated: false,
+        roles: [],
+        permissions: [],
+        verified: false,
+      };
+    }
+
+    const verified =
+      Boolean(this.currentUser.emailVerified) ||
+      Boolean(this.currentUser.phoneVerified) ||
+      !this.ir.requireEmailVerification;
+
+    return {
+      authenticated: true,
+      userId: this.currentUser.id,
+      roles:
+        this.currentUser.roles && this.currentUser.roles.length > 0
+          ? this.currentUser.roles
+          : this.ir.defaultRoles,
+      permissions: this.currentUser.permissions ?? [],
+      verified,
+      tenantId: this.currentUser.tenantId ?? this.currentSession?.tenantId,
+      accountStatus: this.currentUser.accountStatus ?? 'active',
+      issuedAt: this.accessContextIssuedAt ?? this.currentSession?.issuedAt,
+    };
+  }
+
+  async restoreSession(): Promise<AuthRuntimeSnapshot> {
+    this.stateMachine.transition('RESTORE_START');
     await this.emitAuthEvent('auth.session.restoring', {});
+    this.notifyStateChange();
 
-    try {
-      const outcome = await this.sessionManager.restoreOrRefreshSession(this.adapter, now);
-      if (
-        (outcome.status === 'restored' || outcome.status === 'refreshed') &&
-        outcome.session
-      ) {
-        this.stateMachine.transition({
-          type: 'RESTORE_SUCCESS',
-          session: outcome.session,
-        });
-        await this.emitAuthEvent('auth.session.restored', {
-          userId: outcome.session.user.id,
-          roles: outcome.session.user.roles ?? [],
-        });
-      } else if (outcome.status === 'expired') {
-        this.stateMachine.transition({ type: 'RESTORE_EMPTY' });
-        await this.emitAuthEvent('auth.session.expired', {});
-      } else {
-        this.stateMachine.transition({ type: 'RESTORE_EMPTY' });
-      }
-    } catch (err) {
-      const normalized = normalizeAuthError(err);
-      this.stateMachine.transition({ type: 'RESTORE_ERROR', error: normalized });
-      await this.emitAuthEvent('auth.session.expired', { error: normalized.code });
+    const restored = await this.sessionManager.restoreSession(this.adapter);
+    if (restored.status === 'restored' && restored.session) {
+      this.currentSession = restored.session;
+      this.currentUser = restored.session.user;
+      this.accessContextIssuedAt = restored.session.issuedAt;
+      this.currentChallenge = null;
+      this.lastError = null;
+      this.stateMachine.transition('RESTORE_SUCCESS');
+
+      await this.emitAuthEvent('auth.session.restored', {
+        userId: restored.session.user.id,
+        sessionId: restored.session.sessionId,
+      });
+    } else if (restored.status === 'expired') {
+      this.currentSession = null;
+      this.currentUser = null;
+      this.accessContextIssuedAt = undefined;
+      this.stateMachine.transition('RESTORE_EMPTY');
+      await this.emitAuthEvent('auth.session.expired', {
+        reason: restored.reason ?? 'expired',
+      });
+    } else {
+      this.currentSession = null;
+      this.currentUser = null;
+      this.accessContextIssuedAt = undefined;
+      this.stateMachine.transition('RESTORE_EMPTY');
     }
 
-    return this.stateMachine.getState();
+    this.notifyStateChange();
+    return this.getSnapshot();
   }
 
-  private async handleAuthResult(
-    result: AuthResult,
-    sourceOperation: 'login' | 'register' | 'verify' | 'challenge'
-  ): Promise<AuthMachineState> {
-    if (result.status === 'account_suspended') {
-      this.stateMachine.transition({
-        type: 'ACCOUNT_SUSPENDED',
-        error: {
-          code: 'ACCOUNT_SUSPENDED',
-          message: 'Account has been suspended.',
-          recoverable: false,
-          timestamp: Date.now(),
-        },
-      });
-      await this.emitAuthEvent('auth.account.suspended', {
-        userId: result.user?.id,
-      });
-      return this.stateMachine.getState();
-    }
-
-    if (result.status === 'verification_required') {
-      this.stateMachine.transition({
-        type: 'VERIFICATION_REQUIRED',
-        user: result.user,
-        challenge: result.challenge,
-      });
-      await this.emitAuthEvent('auth.verification.required', {
-        userId: result.user?.id,
-        screenRef: this.authIR.screenRefs.verification,
-      });
-      return this.stateMachine.getState();
-    }
-
-    if (result.status === 'challenge_required' && result.challenge) {
-      this.stateMachine.transition({
-        type: 'CHALLENGE_REQUIRED',
-        user: result.user,
-        challenge: result.challenge,
-      });
-      return this.stateMachine.getState();
-    }
-
-    if (result.status === 'recovery_required') {
-      this.stateMachine.transition({
-        type: 'RECOVERY_REQUIRED',
-        user: result.user,
-        challenge: result.challenge,
-      });
-      return this.stateMachine.getState();
-    }
-
-    if (result.status === 'authenticated' && result.session) {
-      await this.sessionManager.persistSession(result.session);
-      const eventType =
-        sourceOperation === 'verify'
-          ? 'VERIFY_SUCCESS'
-          : sourceOperation === 'challenge'
-            ? 'CHALLENGE_SUCCESS'
-            : 'AUTH_SUCCESS';
-
-      this.stateMachine.transition({
-        type: eventType,
-        session: result.session,
-      });
-
-      if (sourceOperation === 'register') {
-        await this.emitAuthEvent('auth.registration.completed', {
-          userId: result.session.user.id,
-        });
-      } else {
-        await this.emitAuthEvent('auth.login.success', {
-          userId: result.session.user.id,
-          roles: result.session.user.roles ?? [],
-        });
-      }
-      return this.stateMachine.getState();
-    }
-
-    throw new Error('Unhandled AuthResult state.');
-  }
-
-  async signIn(input: SignInInput): Promise<AuthMachineState> {
-    this.stateMachine.transition({
-      type: 'SIGN_IN_START',
-      provider: this.adapter.providerType,
+  async signIn(input: SignInInput): Promise<AuthRuntimeSnapshot> {
+    this.stateMachine.transition('SIGN_IN_START');
+    this.lastError = null;
+    await this.emitAuthEvent('auth.login.started', {
+      identifier: input.email ?? input.username ?? input.phone,
     });
+    this.notifyStateChange();
+
     try {
       const result = await this.adapter.signIn(input);
-      return await this.handleAuthResult(result, 'login');
+      return await this.applyAuthResult(result, 'login');
     } catch (err) {
-      const normalized = normalizeAuthError(err);
-      this.stateMachine.transition({ type: 'AUTH_ERROR', error: normalized });
-      await this.emitAuthEvent('auth.error', { error: normalized });
+      this.lastError = err instanceof Error ? err.message : 'Sign-in failed';
+      this.stateMachine.transition('AUTH_ERROR');
+      await this.emitAuthEvent('auth.login.failed', {
+        message: this.lastError,
+      });
+      await this.emitAuthEvent('auth.error', {
+        action: 'signIn',
+        message: this.lastError,
+      });
+      this.notifyStateChange();
       throw err;
     }
   }
 
-  async signUp(input: SignUpInput): Promise<AuthMachineState> {
-    if (!this.authIR.authMethods.registration) {
-      throw new Error('Registration method is disabled in Auth configuration.');
-    }
-    this.stateMachine.transition({
-      type: 'SIGN_UP_START',
-      provider: this.adapter.providerType,
+  async signUp(input: SignUpInput): Promise<AuthRuntimeSnapshot> {
+    this.stateMachine.transition('SIGN_UP_START');
+    this.lastError = null;
+    await this.emitAuthEvent('auth.registration.started', {
+      email: input.email,
     });
+    this.notifyStateChange();
+
     try {
       const result = await this.adapter.signUp(input);
-      if (
-        this.authIR.authMethods.emailVerification &&
-        result.status === 'authenticated' &&
-        result.user?.emailVerified === false
-      ) {
-        return await this.handleAuthResult(
-          {
-            status: 'verification_required',
-            user: result.user,
-          },
-          'register'
-        );
-      }
-      return await this.handleAuthResult(result, 'register');
+      return await this.applyAuthResult(result, 'registration');
     } catch (err) {
-      const normalized = normalizeAuthError(err);
-      this.stateMachine.transition({ type: 'AUTH_ERROR', error: normalized });
-      await this.emitAuthEvent('auth.error', { error: normalized });
-      throw err;
-    }
-  }
-
-  async signOut(): Promise<AuthMachineState> {
-    if (this.stateMachine.canTransition('SIGN_OUT_START')) {
-      this.stateMachine.transition({ type: 'SIGN_OUT_START' });
-    }
-    await this.sessionManager.clearAndRevoke(this.adapter);
-    if (this.stateMachine.canTransition('SIGN_OUT_COMPLETE')) {
-      this.stateMachine.transition({ type: 'SIGN_OUT_COMPLETE' });
-    } else if (this.stateMachine.canTransition('RESET_TO_ANONYMOUS')) {
-      this.stateMachine.transition({ type: 'RESET_TO_ANONYMOUS' });
-    }
-    await this.emitAuthEvent('auth.logout.success', {});
-    return this.stateMachine.getState();
-  }
-
-  async refreshSession(): Promise<AuthMachineState> {
-    if (this.stateMachine.canTransition('REFRESH_START')) {
-      this.stateMachine.transition({ type: 'REFRESH_START' });
-    }
-    try {
-      const session = await this.sessionManager.refreshSession(this.adapter);
-      this.stateMachine.transition({ type: 'REFRESH_SUCCESS', session });
-      await this.emitAuthEvent('auth.access.changed', {
-        userId: session.user.id,
-        roles: session.user.roles ?? [],
+      this.lastError = err instanceof Error ? err.message : 'Sign-up failed';
+      this.stateMachine.transition('AUTH_ERROR');
+      await this.emitAuthEvent('auth.error', {
+        action: 'signUp',
+        message: this.lastError,
       });
-      return this.stateMachine.getState();
-    } catch (err) {
-      const normalized = normalizeAuthError(err);
-      await this.sessionManager.tokenManager.clearTokens();
-      this.stateMachine.transition({ type: 'REFRESH_FAILURE', error: normalized });
-      await this.emitAuthEvent('auth.session.expired', { reason: normalized.code });
-      return this.stateMachine.getState();
+      this.notifyStateChange();
+      throw err;
     }
   }
 
-  async verifyEmail(input: EmailVerificationInput): Promise<AuthMachineState> {
+  async signOut(): Promise<AuthRuntimeSnapshot> {
+    this.stateMachine.transition('SIGN_OUT_START');
+    await this.emitAuthEvent('auth.logout.started', {
+      userId: this.currentUser?.id,
+    });
+    this.notifyStateChange();
+
+    const userId = this.currentUser?.id;
     try {
-      await this.adapter.verifyEmail(input);
-      if (this.stateMachine.canTransition('VERIFY_COMPLETE_TO_LOGIN')) {
-        this.stateMachine.transition({ type: 'VERIFY_COMPLETE_TO_LOGIN' });
-      }
-      await this.emitAuthEvent('auth.registration.completed', { verified: true });
-      return this.stateMachine.getState();
+      await this.adapter.signOut();
+    } finally {
+      await this.sessionManager.clearPersistedSession();
+      this.currentSession = null;
+      this.currentUser = null;
+      this.accessContextIssuedAt = undefined;
+      this.currentChallenge = null;
+      this.lastError = null;
+      this.stateMachine.transition('SIGN_OUT_COMPLETE');
+      await this.emitAuthEvent('auth.logout.success', {
+        userId,
+      });
+      this.notifyStateChange();
+    }
+
+    return this.getSnapshot();
+  }
+
+  async refreshSession(): Promise<AuthRuntimeSnapshot> {
+    if (!this.currentSession) {
+      throw new Error('Cannot refresh session when no session is active.');
+    }
+
+    this.stateMachine.transition('REFRESH_START');
+    this.notifyStateChange();
+
+    try {
+      const refreshed = await this.sessionManager.refreshSessionSingleFlight(
+        this.adapter,
+        this.currentSession
+      );
+      this.currentSession = refreshed;
+      this.currentUser = refreshed.user;
+      this.accessContextIssuedAt = refreshed.issuedAt;
+      this.stateMachine.transition('REFRESH_SUCCESS');
+      await this.emitAuthEvent('auth.session.refreshed', {
+        userId: refreshed.user.id,
+        sessionId: refreshed.sessionId,
+      });
+      this.notifyStateChange();
+      return this.getSnapshot();
     } catch (err) {
-      const normalized = normalizeAuthError(err);
-      if (this.stateMachine.canTransition('VERIFY_ERROR')) {
-        this.stateMachine.transition({ type: 'VERIFY_ERROR', error: normalized });
-      }
+      await this.sessionManager.clearPersistedSession();
+      this.currentSession = null;
+      this.currentUser = null;
+      this.accessContextIssuedAt = undefined;
+      this.stateMachine.transition('REFRESH_FAILED');
+      await this.emitAuthEvent('auth.session.expired', {
+        reason: err instanceof Error ? err.message : 'refresh_failed',
+      });
+      this.notifyStateChange();
       throw err;
     }
+  }
+
+  async verifyEmail(input: EmailVerificationInput): Promise<AuthRuntimeSnapshot> {
+    await this.adapter.verifyEmail(input);
+    if (this.currentUser) {
+      this.currentUser = {
+        ...this.currentUser,
+        emailVerified: true,
+        accountStatus: 'active',
+      };
+    }
+    this.currentChallenge = null;
+    this.accessContextIssuedAt = Date.now();
+    if (this.currentSession && this.currentUser) {
+      this.currentSession = {
+        ...this.currentSession,
+        user: this.currentUser,
+      };
+      await this.sessionManager.persistSession(this.currentSession);
+    }
+
+    this.stateMachine.transition('VERIFICATION_COMPLETE');
+    await this.emitAuthEvent('auth.login.success', {
+      userId: this.currentUser?.id,
+      via: 'email_verification',
+    });
+    this.notifyStateChange();
+    return this.getSnapshot();
+  }
+
+  async requestOtp(input: OtpRequest): Promise<{ challengeId: string }> {
+    if (!hasOtpCapability(this.adapter)) {
+      throw new Error(
+        `Provider "${this.adapter.providerType}" does not support OTP capability.`
+      );
+    }
+    return this.adapter.requestOtp(input);
+  }
+
+  async verifyOtp(input: OtpVerification): Promise<AuthRuntimeSnapshot> {
+    if (!hasOtpCapability(this.adapter)) {
+      throw new Error(
+        `Provider "${this.adapter.providerType}" does not support OTP capability.`
+      );
+    }
+    const result = await this.adapter.verifyOtp(input);
+    return this.applyAuthResult(result, 'login');
+  }
+
+  async verifyMfa(input: MfaVerifyInput): Promise<AuthRuntimeSnapshot> {
+    if (!hasMfaCapability(this.adapter)) {
+      throw new Error(
+        `Provider "${this.adapter.providerType}" does not support MFA capability.`
+      );
+    }
+    const result = await this.adapter.verifyMfa(input);
+    if (result.status === 'authenticated' && result.session) {
+      this.currentSession = result.session;
+      this.currentUser = result.session.user;
+      this.accessContextIssuedAt = result.session.issuedAt;
+      this.currentChallenge = null;
+      await this.sessionManager.persistSession(result.session);
+      this.stateMachine.transition('CHALLENGE_COMPLETE');
+      await this.emitAuthEvent('auth.login.success', {
+        userId: result.session.user.id,
+        via: 'mfa',
+      });
+      this.notifyStateChange();
+      return this.getSnapshot();
+    }
+    return this.applyAuthResult(result, 'login');
   }
 
   async requestPasswordReset(input: PasswordResetRequest): Promise<void> {
@@ -321,101 +387,160 @@ export class AuthController {
 
   async resetPassword(input: PasswordResetInput): Promise<void> {
     await this.adapter.resetPassword(input);
-    if (this.stateMachine.canTransition('RECOVERY_SUCCESS')) {
-      this.stateMachine.transition({ type: 'RECOVERY_SUCCESS' });
-    }
   }
 
-  async requestOtp(input: OtpRequest): Promise<{ challengeId: string }> {
-    if (!hasOtpCapability(this.adapter)) {
-      throw new Error(`Active provider "${this.adapter.providerType}" does not implement OtpCapability.`);
+  /**
+   * Refreshes the user's roles, permissions, and account status strictly from the
+   * trusted authentication provider / backend server (Audit Finding 14 & Section 14.8).
+   * Unverified client-side role mutation is prohibited.
+   */
+  async refreshAccessContextFromServer(): Promise<AuthRuntimeSnapshot> {
+    if (!this.currentSession) {
+      throw new Error('Cannot refresh access context when no session is active.');
     }
-    return this.adapter.requestOtp(input);
+
+    const verifiedUser = await this.adapter.getCurrentUser();
+    if (!verifiedUser) {
+      throw new Error('Provider getCurrentUser() returned null during access context refresh.');
+    }
+
+    this.currentUser = verifiedUser;
+    this.accessContextIssuedAt = Date.now();
+    this.currentSession = {
+      ...this.currentSession,
+      user: verifiedUser,
+    };
+    await this.sessionManager.persistSession(this.currentSession);
+
+    await this.emitAuthEvent('auth.access.changed', {
+      userId: verifiedUser.id,
+      roles: verifiedUser.roles ?? [],
+      permissions: verifiedUser.permissions ?? [],
+      issuedAt: this.accessContextIssuedAt,
+    });
+    this.notifyStateChange();
+    return this.getSnapshot();
   }
 
-  async verifyOtp(input: OtpVerification): Promise<AuthMachineState> {
-    if (!hasOtpCapability(this.adapter)) {
-      throw new Error(`Active provider "${this.adapter.providerType}" does not implement OtpCapability.`);
-    }
-    if (this.stateMachine.canTransition('SIGN_IN_START')) {
-      this.stateMachine.transition({
-        type: 'SIGN_IN_START',
-        provider: this.adapter.providerType,
-      });
-    }
-    const result = await this.adapter.verifyOtp(input);
-    return this.handleAuthResult(result, 'login');
-  }
-
-  async verifyMfa(input: MfaVerifyInput): Promise<AuthMachineState> {
-    if (!hasMfaCapability(this.adapter)) {
-      throw new Error(`Active provider "${this.adapter.providerType}" does not implement MfaCapability.`);
-    }
-    try {
-      const result = await this.adapter.verifyMfa(input);
-      return await this.handleAuthResult(result, 'challenge');
-    } catch (err) {
-      const normalized = normalizeAuthError(err);
-      if (this.stateMachine.canTransition('CHALLENGE_ERROR')) {
-        this.stateMachine.transition({ type: 'CHALLENGE_ERROR', error: normalized });
+  private async applyAuthResult(
+    result: Awaited<ReturnType<AuthProviderAdapter['signIn']>>,
+    sourceAction: 'login' | 'registration'
+  ): Promise<AuthRuntimeSnapshot> {
+    if (result.status === 'verification_required') {
+      this.currentUser = result.user ?? null;
+      this.currentChallenge = result.challenge ?? null;
+      this.stateMachine.transition('VERIFICATION_REQUIRED');
+      if (sourceAction === 'registration') {
+        await this.emitAuthEvent('auth.registration.completed', {
+          userId: result.user?.id,
+          verificationRequired: true,
+        });
       }
-      throw err;
-    }
-  }
-
-  async updateAccessRolesAndPermissions(
-    roles: string[],
-    permissions: string[] = []
-  ): Promise<AccessContext> {
-    const current = this.stateMachine.getState();
-    if (current.status === 'authenticated' && current.user) {
-      const stored = await this.sessionManager.tokenManager.loadSession();
-      if (stored) {
-        stored.user = {
-          ...stored.user,
-          roles,
-          permissions,
-        };
-        await this.sessionManager.persistSession(stored);
-        if (this.stateMachine.canTransition('REFRESH_START')) {
-          this.stateMachine.transition({ type: 'REFRESH_START' });
-          this.stateMachine.transition({ type: 'REFRESH_SUCCESS', session: stored });
-        }
-      }
-    }
-    await this.emitAuthEvent('auth.access.changed', { roles, permissions });
-    return this.getAccessContext();
-  }
-
-  async suspendAccount(reason = 'Account suspended by administrator'): Promise<AuthMachineState> {
-    await this.sessionManager.tokenManager.clearTokens();
-    if (this.stateMachine.canTransition('ACCOUNT_SUSPENDED')) {
-      this.stateMachine.transition({
-        type: 'ACCOUNT_SUSPENDED',
-        error: {
-          code: 'ACCOUNT_SUSPENDED',
-          message: reason,
-          recoverable: false,
-          timestamp: Date.now(),
-        },
+      await this.emitAuthEvent('auth.verification.required', {
+        userId: result.user?.id,
+        challenge: result.challenge,
       });
+      this.notifyStateChange();
+      return this.getSnapshot();
     }
-    await this.emitAuthEvent('auth.account.suspended', { reason });
-    return this.stateMachine.getState();
+
+    if (result.status === 'challenge_required') {
+      this.currentUser = result.user ?? null;
+      this.currentChallenge = result.challenge ?? null;
+      this.stateMachine.transition('CHALLENGE_REQUIRED');
+      await this.emitAuthEvent('auth.challenge.required', {
+        userId: result.user?.id,
+        challenge: result.challenge,
+      });
+      this.notifyStateChange();
+      return this.getSnapshot();
+    }
+
+    if (result.status === 'account_suspended' || result.status === 'account_disabled') {
+      this.currentUser = result.user ?? null;
+      this.currentSession = null;
+      this.stateMachine.transition('RECOVERY_REQUIRED');
+      await this.emitAuthEvent('auth.account.suspended', {
+        userId: result.user?.id,
+        status: result.status,
+      });
+      this.notifyStateChange();
+      return this.getSnapshot();
+    }
+
+    if (result.status === 'authenticated' && result.session) {
+      if (
+        this.ir.requireEmailVerification &&
+        result.session.user.emailVerified === false
+      ) {
+        this.currentUser = result.session.user;
+        this.currentSession = result.session;
+        this.stateMachine.transition('VERIFICATION_REQUIRED');
+        await this.emitAuthEvent('auth.verification.required', {
+          userId: result.session.user.id,
+        });
+        this.notifyStateChange();
+        return this.getSnapshot();
+      }
+
+      this.currentSession = result.session;
+      this.currentUser = result.session.user;
+      this.accessContextIssuedAt = result.session.issuedAt;
+      this.currentChallenge = null;
+      await this.sessionManager.persistSession(result.session);
+
+      if (sourceAction === 'registration') {
+        this.stateMachine.transition('SIGN_UP_SUCCESS');
+        await this.emitAuthEvent('auth.registration.completed', {
+          userId: result.session.user.id,
+          verificationRequired: false,
+        });
+      } else {
+        this.stateMachine.transition('SIGN_IN_SUCCESS');
+      }
+
+      await this.emitAuthEvent('auth.login.success', {
+        userId: result.session.user.id,
+        sessionId: result.session.sessionId,
+      });
+      this.notifyStateChange();
+      return this.getSnapshot();
+    }
+
+    this.stateMachine.transition('RECOVERY_REQUIRED');
+    this.notifyStateChange();
+    return this.getSnapshot();
   }
 
-  getState(): AuthMachineState {
-    return this.stateMachine.getState();
+  private async emitAuthEvent(
+    eventName: AuthLifecycleEventName,
+    payload: Record<string, unknown>
+  ): Promise<void> {
+    const flowMap: Record<string, string | undefined> = {
+      'auth.login.success': this.ir.eventFlows.onLoginSuccess,
+      'auth.logout.success': this.ir.eventFlows.onLogout,
+      'auth.registration.completed': this.ir.eventFlows.onRegisterSuccess,
+      'auth.session.expired': this.ir.eventFlows.onSessionExpired,
+      'auth.verification.required': this.ir.eventFlows.onVerificationRequired,
+      'auth.access.changed': this.ir.eventFlows.onAccessChanged,
+    };
+
+    const flowRef = flowMap[eventName];
+    const envelope = await this.eventBus.emitAsync(eventName, payload, {
+      source: 'auth',
+      flowRef,
+    });
+
+    // Single-owner flow dispatch deduplication (Audit Finding 12)
+    if (flowRef && this.eventBus.claimFlowDispatch(envelope.id, flowRef)) {
+      await this.flowRegistry.dispatch(flowRef, eventName, payload, envelope.id);
+    }
   }
 
-  getAccessContext(): AccessContext {
-    return buildAccessContext(
-      this.stateMachine.getState(),
-      this.authIR.accessContext.defaultRoles
-    );
-  }
-
-  subscribe(listener: (state: AuthMachineState) => void): () => void {
-    return this.stateMachine.subscribe(listener);
+  private notifyStateChange(): void {
+    const snapshot = this.getSnapshot();
+    for (const listener of this.stateListeners) {
+      listener(snapshot);
+    }
   }
 }

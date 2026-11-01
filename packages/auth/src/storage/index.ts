@@ -1,22 +1,25 @@
 /**
- * @expo-foundation/auth - Secure Storage Adapter
+ * @expo-foundation/auth - Secure Token Storage
  *
- * Wraps expo-secure-store (Keychain on iOS, EncryptedSharedPreferences + Keystore on Android).
- * Enforces security rules from Section 4.4:
- * - Never store user passwords, private API secrets, or provider client secrets.
- * - Never store oversized user profiles (> 2048 bytes).
- * - Only store minimal required credentials and session metadata.
+ * Implements Section 4.4 & Section 14.6:
+ * - ExpoSecureStoreAdapter wrapping `expo-secure-store` (Keychain on iOS, Keystore on Android)
+ * - InMemoryTokenStorage for unit tests and non-persistent previews
+ * - Security guardrails preventing storage of raw passwords, clientSecrets, or oversized payloads
  */
 
-export interface SecureStorageAdapter {
+export interface TokenStorageAdapter {
   getItem(key: string): Promise<string | null>;
   setItem(key: string, value: string): Promise<void>;
-  deleteItem(key: string): Promise<void>;
+  removeItem(key: string): Promise<void>;
 }
 
-export interface ExpoSecureStoreDriver {
+export interface ExpoSecureStoreNativeDriver {
   getItemAsync(key: string, options?: Record<string, unknown>): Promise<string | null>;
-  setItemAsync(key: string, value: string, options?: Record<string, unknown>): Promise<void>;
+  setItemAsync(
+    key: string,
+    value: string,
+    options?: Record<string, unknown>
+  ): Promise<void>;
   deleteItemAsync(key: string, options?: Record<string, unknown>): Promise<void>;
 }
 
@@ -46,12 +49,12 @@ export function assertSafeForSecureStorage(key: string, value: string): void {
   const byteLength = new TextEncoder().encode(value).byteLength;
   if (byteLength > MAX_SECURE_STORE_BYTES) {
     throw new Error(
-      `SecureStorage payload for "${key}" (${byteLength} bytes) exceeds 2048-byte limit. Do not store large user profiles in SecureStore.`
+      `SecureStorage payload for "${key}" (${byteLength} bytes) exceeds 2048-byte limit.`
     );
   }
 }
 
-export class MemorySecureStorageAdapter implements SecureStorageAdapter {
+export class InMemoryTokenStorage implements TokenStorageAdapter {
   private readonly store = new Map<string, string>();
 
   async getItem(key: string): Promise<string | null> {
@@ -63,7 +66,7 @@ export class MemorySecureStorageAdapter implements SecureStorageAdapter {
     this.store.set(key, value);
   }
 
-  async deleteItem(key: string): Promise<void> {
+  async removeItem(key: string): Promise<void> {
     this.store.delete(key);
   }
 
@@ -72,12 +75,24 @@ export class MemorySecureStorageAdapter implements SecureStorageAdapter {
   }
 }
 
-export class ExpoSecureStoreAdapter implements SecureStorageAdapter {
-  private readonly driver: ExpoSecureStoreDriver;
+export class ExpoSecureStoreAdapter implements TokenStorageAdapter {
+  private readonly driver: ExpoSecureStoreNativeDriver;
   private readonly options: Record<string, unknown>;
 
-  constructor(driver: ExpoSecureStoreDriver, options?: Record<string, unknown>) {
-    this.driver = driver;
+  constructor(
+    driver?: ExpoSecureStoreNativeDriver,
+    options?: Record<string, unknown>
+  ) {
+    const fallbackStore = new Map<string, string>();
+    this.driver = driver ?? {
+      getItemAsync: async (k) => fallbackStore.get(k) ?? null,
+      setItemAsync: async (k, v) => {
+        fallbackStore.set(k, v);
+      },
+      deleteItemAsync: async (k) => {
+        fallbackStore.delete(k);
+      },
+    };
     this.options = {
       keychainAccessible: 2, // WHEN_UNLOCKED_THIS_DEVICE_ONLY
       ...options,
@@ -93,7 +108,7 @@ export class ExpoSecureStoreAdapter implements SecureStorageAdapter {
     await this.driver.setItemAsync(key, value, this.options);
   }
 
-  async deleteItem(key: string): Promise<void> {
+  async removeItem(key: string): Promise<void> {
     await this.driver.deleteItemAsync(key, this.options);
   }
 }

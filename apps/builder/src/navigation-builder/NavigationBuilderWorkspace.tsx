@@ -1,561 +1,832 @@
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import {
-  defaultCapabilityRegistry,
-  defaultFoundationCompiler,
+  CapabilityRegistry,
   type AccessPolicy,
-  type Diagnostic,
+  type CompilationMode,
   type NavigationConfigDocument,
+  type NavigatorDefinition,
+  type NavigatorType,
+  type RouteDefinition,
+  type RouteParamScalarType,
 } from '@expo-foundation/core';
-import {
-  DeepLinkManager,
-  NavigationGraphEngine,
-  NavigationStateManager,
-  RouteRegistry,
-  type GraphHierarchyNode,
-} from '@expo-foundation/navigation';
 
-export interface NavigationBuilderWorkspaceProps {
-  navigationConfig: NavigationConfigDocument | null;
+interface Props {
+  config: NavigationConfigDocument;
   onChange: (next: NavigationConfigDocument) => void;
-  diagnostics: Diagnostic[];
 }
 
-type NavSubSection =
-  | 'overview'
-  | 'graph'
-  | 'routes'
-  | 'deeplinks'
-  | 'capabilities'
-  | 'json';
+const capabilityRegistry = new CapabilityRegistry();
 
-function GraphTreeNodeView({ node }: { node: GraphHierarchyNode }) {
-  return (
-    <div className="tree-node">
-      <div className={`tree-node-header ${node.kind}`}>
-        <span className={`badge ${node.kind === 'navigator' ? 'badge-nav' : 'badge-route'}`}>
-          {node.kind === 'navigator' ? `NAV: ${node.navigatorType}` : 'ROUTE'}
-        </span>
-        <strong>{node.id}</strong>
-        {node.routePath && <code className="path-chip">{node.routePath}</code>}
-        {node.screenRef && <span className="screen-chip">{node.screenRef}</span>}
-        {node.access && (
-          <span className="access-chip">
-            {typeof node.access === 'string' ? node.access : JSON.stringify(node.access)}
-          </span>
-        )}
-      </div>
-      {node.children.length > 0 && (
-        <div className="tree-children">
-          {node.children.map((child) => (
-            <GraphTreeNodeView key={child.id} node={child} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
+export function NavigationBuilderWorkspace({ config, onChange }: Props) {
+  const [selectedRouteIdx, setSelectedRouteIdx] = useState<number>(0);
+  const [selectedNavIdx, setSelectedNavIdx] = useState<number>(0);
 
-export function NavigationBuilderWorkspace({
-  navigationConfig,
-  onChange,
-  diagnostics,
-}: NavigationBuilderWorkspaceProps) {
-  const [section, setSection] = useState<NavSubSection>('overview');
-  const [rawJsonText, setRawJsonText] = useState<string>(() =>
-    navigationConfig ? JSON.stringify(navigationConfig, null, 2) : ''
-  );
-  const [jsonError, setJsonError] = useState<string | null>(null);
+  // Add Navigator modal / inline form state
+  const [newNavId, setNewNavId] = useState('');
+  const [newNavType, setNewNavType] = useState<NavigatorType>('stack');
 
-  // New Route Form
-  const [newRouteId, setNewRouteId] = useState('app.promo.detail');
-  const [newRoutePath, setNewRoutePath] = useState('/promos/:promoId');
-  const [newRouteScreenRef, setNewRouteScreenRef] = useState('screen.app.promo-detail');
-  const [newRouteAccess, setNewRouteAccess] = useState<'public' | 'guest' | 'authenticated'>(
-    'authenticated'
-  );
+  // Add Route inline form state
+  const [newRouteId, setNewRouteId] = useState('');
+  const [newRoutePath, setNewRoutePath] = useState('');
+  const [newRouteScreenRef, setNewRouteScreenRef] = useState('screen.app.new-screen');
 
-  // Deep Link Interactive Tester
-  const [testUrl, setTestUrl] = useState('https://example.com/orders/ORD-1024');
-  const [testAuthenticated, setTestAuthenticated] = useState(false);
+  // Add Parameter inline form state
+  const [newParamName, setNewParamName] = useState('');
+  const [newParamType, setNewParamType] = useState<RouteParamScalarType>('string');
+  const [newParamRequired, setNewParamRequired] = useState(true);
 
-  const navDiagnostics = useMemo(
-    () => diagnostics.filter((d) => d.document === 'navigation'),
-    [diagnostics]
-  );
+  const iosCaps = capabilityRegistry.listCapabilities('ios');
+  const androidCaps = capabilityRegistry.listCapabilities('android');
 
-  const capabilities = useMemo(
-    () => defaultCapabilityRegistry.listCapabilities(),
-    []
-  );
+  const selectedRoute: RouteDefinition | undefined =
+    config.routes[selectedRouteIdx] ?? config.routes[0];
+  const selectedNav: NavigatorDefinition | undefined =
+    config.navigators[selectedNavIdx] ?? config.navigators[0];
 
-  if (!navigationConfig) {
-    return (
-      <div className="panel empty-panel">
-        <h3>Navigation Builder is Disabled in Auth-Only Mode</h3>
-        <p>
-          The Auth Builder is running standalone without a navigation graph. Switch to{' '}
-          <strong>Complete Foundation</strong> or <strong>Navigation-Only Mode</strong> in the top
-          bar to configure routes and native navigators.
-        </p>
-      </div>
-    );
-  }
-
-  const graphTree = useMemo(() => {
-    try {
-      const engine = NavigationGraphEngine.fromDocument(navigationConfig);
-      return engine.toTree();
-    } catch {
-      return null;
-    }
-  }, [navigationConfig]);
-
-  const deepLinkPreview = useMemo(() => {
-    try {
-      const compiled = defaultFoundationCompiler.compile({ navigation: navigationConfig });
-      if (!compiled.ir?.navigation) {
-        return { error: 'Fix navigation compilation errors to test deep links.' };
-      }
-      const stateManager = new NavigationStateManager({
-        navigationIR: compiled.ir.navigation,
-      });
-      const registry = RouteRegistry.fromNavigationIR(compiled.ir.navigation);
-      const dlManager = new DeepLinkManager(
-        registry,
-        stateManager,
-        compiled.ir.navigation.linking
-      );
-      return dlManager.handleIncomingUrl(testUrl, {
-        accessContext: {
-          authenticated: testAuthenticated,
-          userId: testAuthenticated ? 'usr_demo' : undefined,
-          roles: testAuthenticated ? ['user'] : [],
-          permissions: [],
-          verified: testAuthenticated,
+  const updateIosMode = (mode: CompilationMode) => {
+    onChange({
+      ...config,
+      platforms: {
+        ...config.platforms,
+        ios: {
+          ...config.platforms.ios,
+          strictNative: mode === 'strict-native',
+          mode,
         },
-      });
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : String(err) };
-    }
-  }, [navigationConfig, testUrl, testAuthenticated]);
+      },
+    });
+  };
 
-  const handleAddRoute = () => {
-    if (!newRouteId.trim() || !newRoutePath.trim() || !newRouteScreenRef.trim()) return;
-    const firstStack =
-      navigationConfig.navigators.find((n) => n.type === 'stack') ??
-      navigationConfig.navigators[0];
+  const updateAndroidMode = (mode: CompilationMode) => {
+    onChange({
+      ...config,
+      platforms: {
+        ...config.platforms,
+        android: {
+          ...config.platforms.android,
+          mode,
+        },
+      },
+    });
+  };
 
-    const paramMatches = newRoutePath.match(/:([a-zA-Z0-9_]+)/g) ?? [];
-    const params: Record<string, { type: 'string'; required: true; source: 'path' }> = {};
-    for (const m of paramMatches) {
-      params[m.slice(1)] = { type: 'string', required: true, source: 'path' };
-    }
+  const updateAndroidRenderer = (
+    renderer: NavigationConfigDocument['platforms']['android']['renderer']
+  ) => {
+    onChange({
+      ...config,
+      platforms: {
+        ...config.platforms,
+        android: {
+          ...config.platforms.android,
+          renderer,
+        },
+      },
+    });
+  };
 
-    const updatedNavigators = navigationConfig.navigators.map((nav) =>
-      nav.id === firstStack?.id && !nav.children.includes(newRouteId.trim())
-        ? { ...nav, children: [...nav.children, newRouteId.trim()] }
+  const addNavigator = () => {
+    const cleanId = newNavId.trim();
+    if (!cleanId || config.navigators.some((n) => n.id === cleanId)) return;
+    const nextNav: NavigatorDefinition = {
+      id: cleanId,
+      type: newNavType,
+      children: [],
+    };
+    const nextNavs = [...config.navigators, nextNav];
+    onChange({
+      ...config,
+      navigators: nextNavs,
+    });
+    setSelectedNavIdx(nextNavs.length - 1);
+    setNewNavId('');
+  };
+
+  const deleteNavigator = (idx: number) => {
+    const target = config.navigators[idx];
+    if (!target || config.navigators.length <= 1) return;
+    const nextNavs = config.navigators
+      .filter((_, i) => i !== idx)
+      .map((n) => ({
+        ...n,
+        children: n.children.filter((c) => c !== target.id),
+      }));
+    const nextRoot =
+      config.rootNavigator === target.id ? nextNavs[0].id : config.rootNavigator;
+    onChange({
+      ...config,
+      rootNavigator: nextRoot,
+      navigators: nextNavs,
+    });
+    setSelectedNavIdx(0);
+  };
+
+  const updateSelectedNavigator = (patch: Partial<NavigatorDefinition>) => {
+    if (!selectedNav) return;
+    const nextNavs = config.navigators.map((nav, i) =>
+      i === selectedNavIdx ? { ...nav, ...patch } : nav
+    );
+    onChange({ ...config, navigators: nextNavs });
+  };
+
+  const toggleNavigatorChild = (childId: string) => {
+    if (!selectedNav) return;
+    const hasChild = selectedNav.children.includes(childId);
+    const nextChildren = hasChild
+      ? selectedNav.children.filter((c) => c !== childId)
+      : [...selectedNav.children, childId];
+    const nextInitial =
+      selectedNav.initialRoute && nextChildren.includes(selectedNav.initialRoute)
+        ? selectedNav.initialRoute
+        : nextChildren[0];
+    updateSelectedNavigator({
+      children: nextChildren,
+      initialRoute: nextInitial,
+    });
+  };
+
+  const addRoute = () => {
+    const cleanId = newRouteId.trim();
+    if (!cleanId || config.routes.some((r) => r.id === cleanId)) return;
+    const path = newRoutePath.trim() || `/${cleanId}`;
+    const screenRef = newRouteScreenRef.trim() || `screen.app.${cleanId}`;
+    const parentNavId = selectedNav?.id ?? config.rootNavigator;
+
+    const newRoute: RouteDefinition = {
+      id: cleanId,
+      name: cleanId,
+      path: path.startsWith('/') ? path : `/${path}`,
+      screenRef,
+      navigatorId: parentNavId,
+      access: 'authenticated',
+      options: {
+        title: cleanId,
+        headerShown: true,
+      },
+    };
+
+    const nextRoutes = [...config.routes, newRoute];
+    const nextNavs = config.navigators.map((nav) =>
+      nav.id === parentNavId && !nav.children.includes(cleanId)
+        ? { ...nav, children: [...nav.children, cleanId] }
         : nav
     );
 
     onChange({
-      ...navigationConfig,
-      navigators: updatedNavigators,
-      routes: [
-        ...navigationConfig.routes,
-        {
-          id: newRouteId.trim(),
-          path: newRoutePath.trim(),
-          screenRef: newRouteScreenRef.trim(),
-          navigatorId: firstStack?.id,
-          access: newRouteAccess,
-          params: Object.keys(params).length > 0 ? params : undefined,
-        },
-      ],
+      ...config,
+      routes: nextRoutes,
+      navigators: nextNavs,
     });
+    setSelectedRouteIdx(nextRoutes.length - 1);
+    setNewRouteId('');
+    setNewRoutePath('');
+  };
+
+  const deleteRoute = (idx: number) => {
+    const target = config.routes[idx];
+    if (!target || config.routes.length <= 1) return;
+    const nextRoutes = config.routes.filter((_, i) => i !== idx);
+    const nextNavs = config.navigators.map((nav) => {
+      const filteredChildren = nav.children.filter((c) => c !== target.id);
+      return {
+        ...nav,
+        children: filteredChildren,
+        initialRoute:
+          nav.initialRoute === target.id ? filteredChildren[0] : nav.initialRoute,
+      };
+    });
+    onChange({
+      ...config,
+      routes: nextRoutes,
+      navigators: nextNavs,
+    });
+    setSelectedRouteIdx(0);
+  };
+
+  const updateRouteAccess = (routeIndex: number, accessValue: string) => {
+    const nextRoutes = [...config.routes];
+    const target = { ...nextRoutes[routeIndex] };
+
+    if (
+      accessValue === 'public' ||
+      accessValue === 'guest' ||
+      accessValue === 'authenticated' ||
+      accessValue === 'verified'
+    ) {
+      target.access = accessValue as AccessPolicy;
+    } else if (accessValue === 'role:admin') {
+      target.access = { roles: ['admin'], mode: 'any' };
+    } else if (accessValue === 'perm:orders.read') {
+      target.access = { permissions: ['orders.read'], mode: 'all' };
+    }
+
+    nextRoutes[routeIndex] = target;
+    onChange({ ...config, routes: nextRoutes });
+  };
+
+  const updateRouteField = (
+    routeIndex: number,
+    field: 'path' | 'screenRef' | 'name' | 'navigatorId',
+    value: string
+  ) => {
+    const nextRoutes = [...config.routes];
+    nextRoutes[routeIndex] = {
+      ...nextRoutes[routeIndex],
+      [field]: value,
+    };
+    onChange({ ...config, routes: nextRoutes });
+  };
+
+  const addParamToSelectedRoute = () => {
+    if (!selectedRoute || !newParamName.trim()) return;
+    const nextRoutes = [...config.routes];
+    const existingParams = selectedRoute.params ?? {};
+    nextRoutes[selectedRouteIdx] = {
+      ...selectedRoute,
+      params: {
+        ...existingParams,
+        [newParamName.trim()]: {
+          type: newParamType,
+          required: newParamRequired,
+        },
+      },
+    };
+    onChange({ ...config, routes: nextRoutes });
+    setNewParamName('');
+  };
+
+  const removeParamFromSelectedRoute = (paramKey: string) => {
+    if (!selectedRoute || !selectedRoute.params) return;
+    const nextParams = { ...selectedRoute.params };
+    delete nextParams[paramKey];
+    const nextRoutes = [...config.routes];
+    nextRoutes[selectedRouteIdx] = {
+      ...selectedRoute,
+      params: nextParams,
+    };
+    onChange({ ...config, routes: nextRoutes });
+  };
+
+  const formatAccessSelectValue = (access?: AccessPolicy): string => {
+    if (!access) return 'public';
+    if (typeof access === 'string') return access;
+    if ('roles' in access) return 'role:admin';
+    if ('permissions' in access) return 'perm:orders.read';
+    return 'authenticated';
   };
 
   return (
-    <div className="workspace-layout">
-      <aside className="subnav">
-        <div className="subnav-title">Navigation Builder Sections</div>
-        {(
-          [
-            ['overview', 'Overview & Platform Policy'],
-            ['graph', 'Route Graph & Navigators'],
-            ['routes', 'Route Registry & Params'],
-            ['deeplinks', 'Deep Link Engine & Tester'],
-            ['capabilities', 'SDK 58 Capability Matrix'],
-            ['json', 'navigation.json Source Editor'],
-          ] as const
-        ).map(([id, label]) => (
-          <button
-            key={id}
-            className={`subnav-btn ${section === id ? 'active' : ''}`}
-            onClick={() => {
-              if (id === 'json') {
-                setRawJsonText(JSON.stringify(navigationConfig, null, 2));
-                setJsonError(null);
-              }
-              setSection(id);
-            }}
-          >
-            {label}
-          </button>
-        ))}
-        <div className="scope-guard-card">
-          <div className="badge badge-info">Strict Scope Boundary</div>
-          <p>
-            Native Navigation Engine only. Resolves screens through external{' '}
-            <code>ScreenRegistry</code>; never embeds screen layouts or UI widgets.
-          </p>
+    <div className="grid-2">
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <div className="panel-title">Navigation Graph & Navigator CRUD</div>
+            <div className="panel-subtitle">
+              Add, edit, or remove navigators (stack, tabs, split, drawer, modal) and manage child hierarchies
+            </div>
+          </div>
+          <span className="badge badge-info">
+            Root: {config.rootNavigator}
+          </span>
         </div>
-      </aside>
 
-      <main className="workspace-content">
-        {section === 'overview' && (
-          <div className="panel">
-            <h2>Navigation Builder Overview</h2>
-            <p className="subtitle">
-              Shared JSON navigation graph targeting SwiftUI on iOS (<code>@expo/ui</code>) and
-              Jetpack Compose + Expo Router on Android.
-            </p>
-
-            <div className="stat-grid">
-              <div className="stat-card">
-                <span className="stat-label">Navigators</span>
-                <strong className="stat-value">{navigationConfig.navigators.length}</strong>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">Registered Routes</span>
-                <strong className="stat-value">{navigationConfig.routes.length}</strong>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">iOS Renderer</span>
-                <strong className="stat-value">
-                  {navigationConfig.platforms.ios.renderer} (strictNative:{' '}
-                  {String(navigationConfig.platforms.ios.strictNative)})
-                </strong>
-              </div>
-              <div className="stat-card">
-                <span className="stat-label">Android Renderer</span>
-                <strong className="stat-value">
-                  {navigationConfig.platforms.android.renderer} (fallback:{' '}
-                  {navigationConfig.platforms.android.fallback})
-                </strong>
-              </div>
-            </div>
-
-            <h3>Platform Compilation Policy</h3>
-            <div className="form-grid">
-              <label className="checkbox-inline">
-                <input
-                  type="checkbox"
-                  checked={navigationConfig.platforms.ios.strictNative}
-                  onChange={(e) =>
-                    onChange({
-                      ...navigationConfig,
-                      platforms: {
-                        ...navigationConfig.platforms,
-                        ios: {
-                          ...navigationConfig.platforms.ios,
-                          strictNative: e.target.checked,
-                        },
-                      },
-                    })
-                  }
-                />
-                <span>iOS Strict Native Mode (SwiftUI NavigationStack / TabView)</span>
-              </label>
-
-              <label>
-                <span>Android Renderer Policy</span>
-                <select
-                  value={navigationConfig.platforms.android.renderer}
-                  onChange={(e) =>
-                    onChange({
-                      ...navigationConfig,
-                      platforms: {
-                        ...navigationConfig.platforms,
-                        android: {
-                          ...navigationConfig.platforms.android,
-                          renderer: e.target.value as
-                            | 'auto'
-                            | 'expo-ui-compose'
-                            | 'expo-router',
-                        },
-                      },
-                    })
-                  }
-                >
-                  <option value="auto">auto (Compose UI + Expo Router)</option>
-                  <option value="expo-ui-compose">expo-ui-compose</option>
-                  <option value="expo-router">expo-router</option>
-                </select>
-              </label>
-
-              <label>
-                <span>Android Tab Fallback Strategy</span>
-                <select
-                  value={navigationConfig.platforms.android.fallback}
-                  onChange={(e) =>
-                    onChange({
-                      ...navigationConfig,
-                      platforms: {
-                        ...navigationConfig.platforms,
-                        android: {
-                          ...navigationConfig.platforms.android,
-                          fallback: e.target.value as 'expo-router' | 'native-tabs',
-                        },
-                      },
-                    })
-                  }
-                >
-                  <option value="expo-router">expo-router (Compose Bar + TabRouter)</option>
-                  <option value="native-tabs">native-tabs (Expo Router NativeTabs)</option>
-                </select>
-              </label>
-            </div>
-
-            {navDiagnostics.length > 0 && (
-              <div className="alert alert-warn">
-                <strong>{navDiagnostics.length} Navigation Diagnostic(s) Active</strong> — check
-                the Diagnostics tab for full details.
-              </div>
-            )}
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">iOS Compilation Mode (@expo/ui/swift-ui)</label>
+            <select
+              className="form-select"
+              value={
+                config.platforms.ios.mode ??
+                (config.platforms.ios.strictNative
+                  ? 'strict-native'
+                  : 'automatic-fallback')
+              }
+              onChange={(e) => updateIosMode(e.target.value as CompilationMode)}
+            >
+              <option value="strict-native">strict-native (SwiftUI Host Required)</option>
+              <option value="automatic-fallback">automatic-fallback</option>
+              <option value="diagnostic">diagnostic</option>
+            </select>
           </div>
-        )}
 
-        {section === 'graph' && (
-          <div className="panel">
-            <h2>Navigation Graph Hierarchy</h2>
-            <p className="subtitle">
-              Root Navigator: <code>{navigationConfig.rootNavigator}</code>
-            </p>
-            {graphTree ? (
-              <div className="graph-tree-container">
-                <GraphTreeNodeView node={graphTree} />
-              </div>
-            ) : (
-              <div className="alert alert-error">
-                Unable to render route graph tree. Check rootNavigator in navigation.json.
-              </div>
-            )}
+          <div className="form-group">
+            <label className="form-label">Android Compilation Mode</label>
+            <select
+              className="form-select"
+              value={config.platforms.android.mode ?? 'automatic-fallback'}
+              onChange={(e) => updateAndroidMode(e.target.value as CompilationMode)}
+            >
+              <option value="automatic-fallback">
+                automatic-fallback (Compose + Expo Router)
+              </option>
+              <option value="strict-native">
+                strict-native (Errors on Router Fallbacks)
+              </option>
+              <option value="diagnostic">diagnostic</option>
+            </select>
           </div>
-        )}
+        </div>
 
-        {section === 'routes' && (
-          <div className="panel">
-            <h2>Centralized Route Registry & Typed Parameters</h2>
-            <p className="subtitle">
-              Route IDs remain stable across title, URL path, and external Screen Reference
-              updates.
-            </p>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Android Tabs Renderer</label>
+            <select
+              className="form-select"
+              value={config.platforms.android.renderer}
+              onChange={(e) =>
+                updateAndroidRenderer(
+                  e.target.value as NavigationConfigDocument['platforms']['android']['renderer']
+                )
+              }
+            >
+              <option value="auto">auto (Compose NavigationBar + TabRouter)</option>
+              <option value="expo-ui-compose">expo-ui-compose</option>
+              <option value="expo-router">expo-router (NativeTabs Fallback)</option>
+            </select>
+          </div>
 
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Route ID</th>
-                  <th>URL Path</th>
-                  <th>External Screen Ref</th>
-                  <th>Navigator</th>
-                  <th>Typed Params</th>
-                  <th>Access Policy</th>
-                </tr>
-              </thead>
-              <tbody>
-                {navigationConfig.routes.map((route, idx) => (
-                  <tr key={route.id}>
-                    <td>
-                      <code>{route.id}</code>
-                    </td>
-                    <td>
-                      <code>{route.path}</code>
-                    </td>
-                    <td>
-                      <code>{route.screenRef}</code>
-                    </td>
-                    <td>{route.navigatorId ?? '—'}</td>
-                    <td>
-                      {route.params ? Object.keys(route.params).join(', ') : 'none'}
-                    </td>
-                    <td>
-                      <select
-                        value={typeof route.access === 'string' ? route.access : 'custom'}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          if (val === 'custom') return;
-                          const nextRoutes = [...navigationConfig.routes];
-                          nextRoutes[idx] = {
-                            ...route,
-                            access: val as AccessPolicy,
-                          };
-                          onChange({
-                            ...navigationConfig,
-                            routes: nextRoutes,
-                          });
-                        }}
-                      >
-                        <option value="public">public</option>
-                        <option value="guest">guest</option>
-                        <option value="authenticated">authenticated</option>
-                        <option value="verified">verified</option>
-                        {typeof route.access === 'object' && (
-                          <option value="custom">
-                            role/perm ({JSON.stringify(route.access)})
-                          </option>
-                        )}
-                      </select>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="form-group">
+            <label className="form-label">Root Navigator</label>
+            <select
+              className="form-select"
+              value={config.rootNavigator}
+              onChange={(e) =>
+                onChange({ ...config, rootNavigator: e.target.value })
+              }
+            >
+              {config.navigators.map((nav) => (
+                <option key={nav.id} value={nav.id}>
+                  {nav.id} ({nav.type})
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
 
-            <h3>Register New Route</h3>
-            <div className="form-grid">
-              <label>
-                <span>Stable Route ID</span>
-                <input
-                  type="text"
-                  value={newRouteId}
-                  onChange={(e) => setNewRouteId(e.target.value)}
-                />
-              </label>
-              <label>
-                <span>Path Template</span>
-                <input
-                  type="text"
-                  value={newRoutePath}
-                  onChange={(e) => setNewRoutePath(e.target.value)}
-                />
-              </label>
-              <label>
-                <span>External Screen Ref</span>
-                <input
-                  type="text"
-                  value={newRouteScreenRef}
-                  onChange={(e) => setNewRouteScreenRef(e.target.value)}
-                />
-              </label>
-              <label>
-                <span>Access Policy</span>
-                <select
-                  value={newRouteAccess}
-                  onChange={(e) =>
-                    setNewRouteAccess(
-                      e.target.value as 'public' | 'guest' | 'authenticated'
-                    )
-                  }
-                >
-                  <option value="public">public</option>
-                  <option value="guest">guest</option>
-                  <option value="authenticated">authenticated</option>
-                </select>
-              </label>
-            </div>
-            <button className="btn btn-primary" onClick={handleAddRoute}>
-              + Register Route in Graph
+        <div className="panel-title" style={{ marginTop: 12, marginBottom: 8 }}>
+          Navigator Hierarchy ({config.navigators.length})
+        </div>
+
+        <div className="form-row" style={{ marginBottom: 10 }}>
+          <input
+            className="form-input"
+            placeholder="New navigator ID (e.g. modal-stack)"
+            value={newNavId}
+            onChange={(e) => setNewNavId(e.target.value)}
+          />
+          <div style={{ display: 'flex', gap: 8 }}>
+            <select
+              className="form-select"
+              value={newNavType}
+              onChange={(e) => setNewNavType(e.target.value as NavigatorType)}
+            >
+              <option value="stack">stack</option>
+              <option value="tabs">tabs</option>
+              <option value="split">split</option>
+              <option value="drawer">drawer</option>
+              <option value="modal">modal</option>
+            </select>
+            <button className="btn btn-primary" onClick={addNavigator}>
+              + Navigator
             </button>
           </div>
-        )}
+        </div>
 
-        {section === 'deeplinks' && (
-          <div className="panel">
-            <h2>Deep-Linking Engine & URL Resolution Tester</h2>
-            <p className="subtitle">
-              Handles custom schemes (<code>{navigationConfig.linking?.scheme ?? 'expofoundation'}://</code>
-              ), HTTPS Universal Links, and Android App Links with safe post-login restoration.
-            </p>
-
-            <div className="form-grid">
-              <label>
-                <span>Test Incoming URL</span>
-                <input
-                  type="text"
-                  value={testUrl}
-                  onChange={(e) => setTestUrl(e.target.value)}
-                />
-              </label>
-              <label className="checkbox-inline">
-                <input
-                  type="checkbox"
-                  checked={testAuthenticated}
-                  onChange={(e) => setTestAuthenticated(e.target.checked)}
-                />
-                <span>Simulate User Currently Logged In</span>
-              </label>
+        {config.navigators.map((nav, idx) => (
+          <div
+            key={nav.id}
+            className="graph-node"
+            style={{
+              cursor: 'pointer',
+              borderColor:
+                idx === selectedNavIdx ? 'var(--accent)' : 'var(--border)',
+            }}
+            onClick={() => setSelectedNavIdx(idx)}
+          >
+            <div className="graph-node-header">
+              <span className="graph-node-id">
+                {nav.id}{' '}
+                {nav.id === config.rootNavigator ? '(root)' : ''}
+              </span>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <span className="badge badge-success">{nav.type.toUpperCase()}</span>
+                {config.navigators.length > 1 && (
+                  <button
+                    className="btn"
+                    style={{ padding: '2px 8px', fontSize: 11 }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteNavigator(idx);
+                    }}
+                  >
+                    Delete
+                  </button>
+                )}
+              </div>
             </div>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              Initial: <code>{nav.initialRoute ?? nav.children[0] ?? 'none'}</code>
+            </div>
+            <div className="graph-children">
+              {nav.children.map((c) => (
+                <span key={c} className="chip">
+                  {c}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
 
-            <h4>Deep Link Resolution Result</h4>
-            <pre className="code-block">{JSON.stringify(deepLinkPreview, null, 2)}</pre>
+        {selectedNav && (
+          <div
+            style={{
+              marginTop: 12,
+              padding: 12,
+              borderRadius: 8,
+              background: 'rgba(15, 23, 42, 0.55)',
+              border: '1px solid var(--border)',
+            }}
+          >
+            <div className="panel-title" style={{ marginBottom: 8 }}>
+              Edit Navigator: <code>{selectedNav.id}</code>
+            </div>
+            <div className="form-row">
+              <div className="form-group">
+                <label className="form-label">Navigator Type</label>
+                <select
+                  className="form-select"
+                  value={selectedNav.type}
+                  onChange={(e) =>
+                    updateSelectedNavigator({
+                      type: e.target.value as NavigatorType,
+                    })
+                  }
+                >
+                  <option value="stack">stack</option>
+                  <option value="tabs">tabs</option>
+                  <option value="split">split</option>
+                  <option value="drawer">drawer</option>
+                  <option value="modal">modal</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label className="form-label">Initial Child Route / Navigator</label>
+                <select
+                  className="form-select"
+                  value={selectedNav.initialRoute ?? selectedNav.children[0] ?? ''}
+                  onChange={(e) =>
+                    updateSelectedNavigator({ initialRoute: e.target.value })
+                  }
+                >
+                  {selectedNav.children.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <div className="form-label" style={{ marginBottom: 6 }}>
+              Toggle Assigned Child Navigators & Routes:
+            </div>
+            <div className="graph-children">
+              {[
+                ...config.navigators
+                  .filter((n) => n.id !== selectedNav.id)
+                  .map((n) => n.id),
+                ...config.routes.map((r) => r.id),
+              ].map((candidateId) => {
+                const active = selectedNav.children.includes(candidateId);
+                return (
+                  <button
+                    key={candidateId}
+                    type="button"
+                    className="btn"
+                    style={{
+                      padding: '3px 8px',
+                      fontSize: 11,
+                      background: active ? 'var(--accent)' : undefined,
+                      borderColor: active ? 'var(--accent)' : undefined,
+                    }}
+                    onClick={() => toggleNavigatorChild(candidateId)}
+                  >
+                    {active ? '✓ ' : '+ '}
+                    {candidateId}
+                  </button>
+                );
+              })}
+            </div>
           </div>
         )}
 
-        {section === 'capabilities' && (
-          <div className="panel">
-            <h2>Expo SDK 58 Native Capability Matrix</h2>
-            <p className="subtitle">
-              Formal capability registry verifying iOS SwiftUI and Android Jetpack Compose / Expo
-              Router support.
-            </p>
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Capability ID</th>
-                  <th>Platform</th>
-                  <th>Support</th>
-                  <th>Implementation</th>
-                  <th>Approved Fallback</th>
-                </tr>
-              </thead>
-              <tbody>
-                {capabilities.map((cap) => (
-                  <tr key={`${cap.id}_${cap.platform}`}>
-                    <td>
-                      <code>{cap.id}</code>
-                    </td>
-                    <td>{cap.platform.toUpperCase()}</td>
-                    <td>
-                      <span className={`badge badge-${cap.support}`}>{cap.support}</span>
-                    </td>
-                    <td>
-                      <code>{cap.implementation ?? '—'}</code>
-                    </td>
-                    <td>
-                      <code>{cap.fallback ?? '—'}</code>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {section === 'json' && (
-          <div className="panel">
-            <h2>navigation.json Source Editor</h2>
-            <p className="subtitle">
-              Edit the canonical <code>navigation.json</code> document directly.
-            </p>
-            {jsonError && <div className="alert alert-error">{jsonError}</div>}
-            <textarea
-              className="json-textarea"
-              rows={22}
-              value={rawJsonText}
-              onChange={(e) => {
-                setRawJsonText(e.target.value);
-                try {
-                  const parsed = JSON.parse(e.target.value) as NavigationConfigDocument;
-                  setJsonError(null);
-                  onChange(parsed);
-                } catch (err) {
-                  setJsonError(err instanceof Error ? err.message : 'Invalid JSON');
-                }
-              }}
+        <div className="panel-title" style={{ marginTop: 16, marginBottom: 8 }}>
+          Deep Linking & Universal Link Host Allowlist
+        </div>
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">URL Scheme</label>
+            <input
+              className="form-input"
+              value={config.linking?.scheme ?? 'app'}
+              onChange={(e) =>
+                onChange({
+                  ...config,
+                  linking: {
+                    scheme: e.target.value,
+                    hosts: config.linking?.hosts ?? [],
+                    universalLinks: config.linking?.universalLinks ?? false,
+                    androidAppLinks: config.linking?.androidAppLinks ?? false,
+                  },
+                })
+              }
             />
           </div>
-        )}
-      </main>
+          <div className="form-group">
+            <label className="form-label">Allowed HTTPS Hosts (comma-separated)</label>
+            <input
+              className="form-input"
+              placeholder="shop.expo-foundation.dev"
+              value={(config.linking?.hosts ?? []).join(', ')}
+              onChange={(e) =>
+                onChange({
+                  ...config,
+                  linking: {
+                    scheme: config.linking?.scheme ?? 'app',
+                    hosts: e.target.value
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                    universalLinks: config.linking?.universalLinks ?? false,
+                    androidAppLinks: config.linking?.androidAppLinks ?? false,
+                  },
+                })
+              }
+            />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <div className="panel-title">Routes, Parameters & Access Policies</div>
+              <div className="panel-subtitle">
+                Create routes, bind screenRef IDs, configure typed parameters, and set route guards
+              </div>
+            </div>
+            <span className="badge badge-info">{config.routes.length} Routes</span>
+          </div>
+
+          <div className="form-row" style={{ marginBottom: 10 }}>
+            <input
+              className="form-input"
+              placeholder="Route ID (e.g. checkout)"
+              value={newRouteId}
+              onChange={(e) => setNewRouteId(e.target.value)}
+            />
+            <div style={{ display: 'flex', gap: 8 }}>
+              <input
+                className="form-input"
+                placeholder="/checkout"
+                value={newRoutePath}
+                onChange={(e) => setNewRoutePath(e.target.value)}
+              />
+              <button className="btn btn-primary" onClick={addRoute}>
+                + Route
+              </button>
+            </div>
+          </div>
+
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Route ID</th>
+                <th>Path</th>
+                <th>ScreenRef</th>
+                <th>Access Policy</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {config.routes.map((route, idx) => (
+                <tr
+                  key={route.id}
+                  style={{
+                    background:
+                      idx === selectedRouteIdx
+                        ? 'rgba(59, 130, 246, 0.12)'
+                        : undefined,
+                    cursor: 'pointer',
+                  }}
+                  onClick={() => setSelectedRouteIdx(idx)}
+                >
+                  <td>
+                    <code>{route.id}</code>
+                  </td>
+                  <td>
+                    <input
+                      className="form-input"
+                      style={{ padding: '4px 8px', fontSize: 12 }}
+                      value={route.path}
+                      onChange={(e) =>
+                        updateRouteField(idx, 'path', e.target.value)
+                      }
+                    />
+                  </td>
+                  <td>
+                    <input
+                      className="form-input"
+                      style={{ padding: '4px 8px', fontSize: 12 }}
+                      value={route.screenRef}
+                      onChange={(e) =>
+                        updateRouteField(idx, 'screenRef', e.target.value)
+                      }
+                    />
+                  </td>
+                  <td>
+                    <select
+                      className="form-select"
+                      style={{ padding: '4px 8px', fontSize: 12 }}
+                      value={formatAccessSelectValue(route.access)}
+                      onChange={(e) => updateRouteAccess(idx, e.target.value)}
+                    >
+                      <option value="public">public</option>
+                      <option value="guest">guest (Unauthenticated only)</option>
+                      <option value="authenticated">authenticated</option>
+                      <option value="verified">verified</option>
+                      <option value="role:admin">roles: [admin]</option>
+                      <option value="perm:orders.read">
+                        permissions: [orders.read]
+                      </option>
+                    </select>
+                  </td>
+                  <td>
+                    {config.routes.length > 1 && (
+                      <button
+                        className="btn"
+                        style={{ padding: '2px 8px', fontSize: 11 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteRoute(idx);
+                        }}
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+
+          {selectedRoute && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: 12,
+                borderRadius: 8,
+                background: 'rgba(15, 23, 42, 0.55)',
+                border: '1px solid var(--border)',
+              }}
+            >
+              <div className="panel-title" style={{ marginBottom: 8 }}>
+                Route Parameter Schema: <code>{selectedRoute.id}</code>
+              </div>
+              <div className="graph-children" style={{ marginBottom: 10 }}>
+                {Object.entries(selectedRoute.params ?? {}).map(
+                  ([pName, pSchema]) => (
+                    <span key={pName} className="chip">
+                      {pName}: {pSchema.type}
+                      {pSchema.required ? ' (req)' : ''}{' '}
+                      <button
+                        type="button"
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: 'var(--danger)',
+                          cursor: 'pointer',
+                          marginLeft: 4,
+                        }}
+                        onClick={() => removeParamFromSelectedRoute(pName)}
+                      >
+                        ×
+                      </button>
+                    </span>
+                  )
+                )}
+                {Object.keys(selectedRoute.params ?? {}).length === 0 && (
+                  <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                    No typed parameters declared on this route.
+                  </span>
+                )}
+              </div>
+
+              <div className="form-row">
+                <input
+                  className="form-input"
+                  placeholder="Param name (e.g. orderId)"
+                  value={newParamName}
+                  onChange={(e) => setNewParamName(e.target.value)}
+                />
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <select
+                    className="form-select"
+                    value={newParamType}
+                    onChange={(e) =>
+                      setNewParamType(e.target.value as RouteParamScalarType)
+                    }
+                  >
+                    <option value="string">string</option>
+                    <option value="number">number</option>
+                    <option value="boolean">boolean</option>
+                    <option value="uuid">uuid</option>
+                    <option value="date">date</option>
+                    <option value="enum">enum</option>
+                    <option value="array">array</option>
+                  </select>
+                  <label className="checkbox-item" style={{ padding: '4px 8px' }}>
+                    <input
+                      type="checkbox"
+                      checked={newParamRequired}
+                      onChange={(e) => setNewParamRequired(e.target.checked)}
+                    />
+                    Req
+                  </label>
+                  <button
+                    className="btn btn-primary"
+                    onClick={addParamToSelectedRoute}
+                  >
+                    + Param
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <div className="panel-title">
+                Expo SDK 58 Platform Capability Matrix
+              </div>
+              <div className="panel-subtitle">
+                Verification status: documented | simulated | native-verified
+              </div>
+            </div>
+          </div>
+
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Capability</th>
+                <th>iOS (@expo/ui/swift-ui)</th>
+                <th>Android (Compose + Router)</th>
+                <th>Verification</th>
+              </tr>
+            </thead>
+            <tbody>
+              {iosCaps.map((iosCap) => {
+                const andCap = androidCaps.find((c) => c.id === iosCap.id);
+                return (
+                  <tr key={iosCap.id}>
+                    <td>
+                      <code>{iosCap.id}</code>
+                    </td>
+                    <td>
+                      <span className="badge badge-success">{iosCap.support}</span>{' '}
+                      <small style={{ color: 'var(--text-secondary)' }}>
+                        {iosCap.implementation.split('#')[1]}
+                      </small>
+                    </td>
+                    <td>
+                      <span
+                        className={`badge ${
+                          andCap?.support === 'native' ||
+                          andCap?.support === 'supported'
+                            ? 'badge-success'
+                            : 'badge-warning'
+                        }`}
+                      >
+                        {andCap?.support ?? 'unsupported'}
+                      </span>{' '}
+                      <small style={{ color: 'var(--text-secondary)' }}>
+                        {andCap?.implementation.split('#')[1]}
+                      </small>
+                    </td>
+                    <td>
+                      <span className="badge badge-info">
+                        {iosCap.verificationStatus}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }

@@ -47,7 +47,7 @@ export class NavigationGraphEngine {
 
   static fromNavigationIR(ir: NavigationIR): NavigationGraphEngine {
     return new NavigationGraphEngine({
-      rootNavigator: ir.rootNavigatorId,
+      rootNavigator: ir.rootNavigator,
       navigators: Object.values(ir.navigators),
       routes: Object.values(ir.routes),
     });
@@ -113,7 +113,10 @@ export class NavigationGraphEngine {
     return undefined;
   }
 
-  toTree(nodeId = this.rootNavigatorId, visited = new Set<string>()): GraphHierarchyNode | null {
+  toTree(
+    nodeId = this.rootNavigatorId,
+    visited = new Set<string>()
+  ): GraphHierarchyNode | null {
     if (visited.has(nodeId)) {
       return null;
     }

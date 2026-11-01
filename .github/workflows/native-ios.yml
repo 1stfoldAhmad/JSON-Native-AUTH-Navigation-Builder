@@ -1,0 +1,16 @@
+name: Native iOS Verification (macOS Simulator)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ios-verification:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm test

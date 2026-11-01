@@ -1,5 +1,5 @@
 export {
   AUTH_JSON_SCHEMA,
-  migrateAuthDocument,
-  validateAuthDocument,
+  validateAuthSchema,
+  validateAuthSemantics,
 } from '@expo-foundation/core';

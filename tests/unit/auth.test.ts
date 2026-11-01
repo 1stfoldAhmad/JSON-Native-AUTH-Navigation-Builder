@@ -1,213 +1,321 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  AppleAuthProviderAdapter,
   AuthController,
-  AuthSessionManager,
+  AuthProviderRegistry,
   AuthStateMachine,
-  extractByJsonPath,
-  MemorySecureStorageAdapter,
+  ExpoSecureStoreAdapter,
+  InMemoryTokenStorage,
   OidcAuthProviderAdapter,
   RestAuthProviderAdapter,
+  SessionManager,
+  SupabaseAuthProviderAdapter,
+  generatePkcePair,
+  resolveEnvTemplate,
+  validateIdTokenClaims,
 } from '@expo-foundation/auth';
-import { defaultFoundationCompiler } from '@expo-foundation/core';
-import authOnlyJson from '../../examples/auth-only/auth.json' with { type: 'json' };
+import { FoundationCompiler, type AuthConfigDocument } from '@expo-foundation/core';
+import authOnlyDoc from '../../examples/auth-only/auth.json' with { type: 'json' };
 
 describe('@expo-foundation/auth', () => {
-  it('enforces deterministic AuthStateMachine transitions and redacts raw tokens', () => {
-    const machine = new AuthStateMachine('unknown');
-    expect(machine.getState().status).toBe('unknown');
+  it('enforces valid state machine transitions and rejects invalid transitions', () => {
+    const sm = new AuthStateMachine('unknown');
+    expect(sm.transition('RESTORE_START')).toBe('restoring');
+    expect(sm.transition('RESTORE_EMPTY')).toBe('anonymous');
+    expect(sm.transition('SIGN_IN_START')).toBe('authenticating');
+    expect(sm.transition('SIGN_IN_SUCCESS')).toBe('authenticated');
 
-    // Invalid transition from unknown -> refreshing must throw
-    expect(() => machine.transition({ type: 'REFRESH_START' })).toThrow();
-
-    machine.transition({ type: 'RESTORE_START', provider: 'rest' });
-    expect(machine.getState().status).toBe('restoring');
-
-    machine.transition({ type: 'RESTORE_EMPTY' });
-    expect(machine.getState().status).toBe('anonymous');
-
-    machine.transition({ type: 'SIGN_IN_START', provider: 'rest' });
-    expect(machine.getState().status).toBe('authenticating');
-
-    machine.transition({
-      type: 'AUTH_SUCCESS',
-      session: {
-        sessionId: 'sess_1',
-        provider: 'rest',
-        issuedAt: 1000,
-        expiresAt: 5000,
-        user: {
-          id: 'u_1',
-          email: 'dev@expo.dev',
-          roles: ['user', 'admin'],
-          permissions: ['orders.read'],
-          emailVerified: true,
-        },
-        tokens: {
-          accessToken: 'secret_access_123',
-          refreshToken: 'secret_refresh_456',
-          expiresAt: 5000,
-        },
-      },
-    });
-
-    const state = machine.getState();
-    expect(state.status).toBe('authenticated');
-    expect(state.user?.id).toBe('u_1');
-    expect(state.sessionMetadata?.hasRefreshToken).toBe(true);
-    expect(JSON.stringify(state)).not.toContain('secret_access_123');
-    expect(JSON.stringify(state)).not.toContain('secret_refresh_456');
+    expect(() => sm.transition('SIGN_UP_SUCCESS')).toThrow(/Invalid AuthStateMachine transition/);
   });
 
-  it('prevents duplicate simultaneous refresh calls via single-flight RefreshCoordinator', async () => {
-    const storage = new MemorySecureStorageAdapter();
-    const sessionManager = new AuthSessionManager({
+  it('defaults AuthController to ExpoSecureStoreAdapter unless memory is configured (Finding 6)', () => {
+    const compiler = new FoundationCompiler();
+    const ir = compiler.compile({ auth: authOnlyDoc as unknown as AuthConfigDocument });
+    const controller = new AuthController({ authIR: ir.auth! });
+    const internalStorage = (
+      controller as unknown as { sessionManager: { storage: unknown } }
+    ).sessionManager.storage;
+    expect(internalStorage).toBeInstanceOf(ExpoSecureStoreAdapter);
+  });
+
+  it('does not register any synthetic/mock provider in production AuthProviderRegistry (Finding 5)', () => {
+    const registry = new AuthProviderRegistry();
+    expect(() => registry.create('custom')).toThrow(
+      /No production AuthProviderAdapter registered/
+    );
+  });
+
+  it('coalesces concurrent session refreshes into a single-flight request', async () => {
+    const storage = new InMemoryTokenStorage();
+    const now = Date.now();
+    const sessionManager = new SessionManager({
       storage,
       refreshEnabled: true,
       refreshThresholdSeconds: 60,
-      rotateRefreshTokens: true,
+      now: () => now,
     });
 
-    let networkRefreshCalls = 0;
-    const adapter = new RestAuthProviderAdapter({
-      httpClient: async () => {
-        networkRefreshCalls += 1;
-        await new Promise((r) => setTimeout(r, 25));
+    let refreshCallCount = 0;
+    const fakeAdapter = {
+      providerType: 'rest' as const,
+      initialize: vi.fn(),
+      signIn: vi.fn(),
+      signUp: vi.fn(),
+      signOut: vi.fn(),
+      restoreSession: vi.fn(),
+      refreshSession: vi.fn(async () => {
+        refreshCallCount += 1;
+        await new Promise((r) => setTimeout(r, 20));
         return {
-          status: 200,
-          ok: true,
-          data: {
-            data: {
-              access_token: `rotated_access_${networkRefreshCalls}`,
-              refresh_token: `rotated_refresh_${networkRefreshCalls}`,
-              expires_in: 3600,
-              user: { id: 'u_1', email: 'u@example.com', roles: ['user'] },
-            },
+          sessionId: 'sess_refreshed',
+          user: { id: 'usr_1', email: 'test@expo.dev' },
+          tokens: {
+            accessToken: 'new_access_token',
+            refreshToken: 'new_refresh_token',
+            expiresAt: now + 3600_000,
           },
+          provider: 'rest' as const,
+          issuedAt: now,
+          expiresAt: now + 3600_000,
         };
-      },
-    });
-    await adapter.initialize({ type: 'rest', baseUrl: 'https://api.example.com' });
+      }),
+      requestPasswordReset: vi.fn(),
+      resetPassword: vi.fn(),
+      verifyEmail: vi.fn(),
+      getCurrentUser: vi.fn(),
+    };
 
-    await sessionManager.persistSession({
-      sessionId: 's_initial',
-      provider: 'rest',
-      issuedAt: Date.now() - 3600_000,
-      expiresAt: Date.now() - 1000,
-      user: { id: 'u_1', email: 'u@example.com', roles: ['user'] },
+    const initialSession = {
+      sessionId: 'sess_old',
+      user: { id: 'usr_1', email: 'test@expo.dev' },
       tokens: {
         accessToken: 'old_access',
-        refreshToken: 'initial_refresh',
-        expiresAt: Date.now() - 1000,
+        refreshToken: 'old_refresh',
+        expiresAt: now + 10_000,
+      },
+      provider: 'rest' as const,
+      issuedAt: now - 3500_000,
+      expiresAt: now + 10_000,
+    };
+
+    const [r1, r2, r3] = await Promise.all([
+      sessionManager.refreshSessionSingleFlight(fakeAdapter, initialSession),
+      sessionManager.refreshSessionSingleFlight(fakeAdapter, initialSession),
+      sessionManager.refreshSessionSingleFlight(fakeAdapter, initialSession),
+    ]);
+
+    expect(refreshCallCount).toBe(1);
+    expect(r1.tokens.accessToken).toBe('new_access_token');
+    expect(r2.tokens.accessToken).toBe('new_access_token');
+    expect(r3.tokens.accessToken).toBe('new_access_token');
+  });
+
+  it('hardens RestAuthProviderAdapter: fail-closed env vars, retry safety, and strict user claims (Finding 13)', async () => {
+    expect(() => resolveEnvTemplate('${env.MISSING_API_URL}', {})).toThrow(
+      /Unresolved environment variable/
+    );
+
+    let postAttempts = 0;
+    const adapter = new RestAuthProviderAdapter({
+      env: { API_URL: 'https://api.test.local' },
+      fetchImpl: async (url, init) => {
+        if (url.endsWith('/auth/register')) {
+          postAttempts += 1;
+          throw new Error('Network error on non-idempotent POST');
+        }
+        if (url.endsWith('/auth/login')) {
+          const body = JSON.parse(init.body ?? '{}') as { email: string };
+          if (body.email === 'missing-id@expo.dev') {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                accessToken: 'tok_no_id',
+                user: { email: 'missing-id@expo.dev' },
+              }),
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              accessToken: 'tok_123',
+              refreshToken: 'ref_123',
+              expiresIn: 3600,
+              user: {
+                id: 'usr_rest_1',
+                email: body.email,
+              },
+            }),
+          };
+        }
+        return { ok: true, status: 200, json: async () => ({}) };
       },
     });
 
-    // Fire 5 concurrent refresh calls simultaneously
-    const results = await Promise.all([
-      sessionManager.refreshSession(adapter),
-      sessionManager.refreshSession(adapter),
-      sessionManager.refreshSession(adapter),
-      sessionManager.refreshSession(adapter),
-      sessionManager.refreshSession(adapter),
-    ]);
+    await adapter.initialize({
+      type: 'rest',
+      baseUrl: '${env.API_URL}',
+      retryPolicy: { maxRetries: 3, backoffMs: 5 },
+    });
 
-    expect(networkRefreshCalls).toBe(1);
-    expect(sessionManager.refreshCoordinator.getRefreshExecutionCount()).toBe(1);
-    for (const res of results) {
-      expect(res.tokens.accessToken).toBe('rotated_access_1');
-    }
+    // Non-idempotent POST without Idempotency-Key must NOT retry
+    await expect(
+      adapter.signUp({ email: 'new@expo.dev', password: 'pw' })
+    ).rejects.toThrow(/Network error/);
+    expect(postAttempts).toBe(1);
+
+    // Missing user ID must fail closed instead of fabricating 'usr_anonymous'
+    await expect(
+      adapter.signIn({ email: 'missing-id@expo.dev', password: 'pw' })
+    ).rejects.toThrow(/missing a valid user "id"/);
+
+    // Valid login must not fabricate roles or emailVerified: true when omitted by server
+    const res = await adapter.signIn({ email: 'user@expo.dev', password: 'pw' });
+    expect(res.status).toBe('authenticated');
+    expect(res.user?.id).toBe('usr_rest_1');
+    expect(res.user?.emailVerified).toBe(false);
+    expect(res.user?.roles).toEqual([]);
   });
 
-  it('evaluates restricted JSONPath expressions and blocks unsafe expressions', () => {
-    const payload = {
-      data: {
-        access_token: 'tok_abc',
-        user: { id: 'usr_7' },
-      },
-    };
-    expect(extractByJsonPath(payload, '$.data.access_token')).toBe('tok_abc');
-    expect(extractByJsonPath(payload, '$.data.user.id')).toBe('usr_7');
-    expect(() => extractByJsonPath(payload, '$.__proto__.polluted')).toThrow();
-    expect(() => extractByJsonPath(payload, 'process.exit(1)')).toThrow();
-  });
+  it('validates OIDC PKCE S256, state, nonce, and ID token claims and fails closed without crypto (Finding 5)', async () => {
+    const pkce = await generatePkcePair();
+    expect(pkce.codeVerifier.length).toBeGreaterThanOrEqual(40);
+    expect(pkce.codeChallenge).not.toBe(pkce.codeVerifier);
+    expect(pkce.nonce.length).toBeGreaterThan(10);
 
-  it('executes OIDC Authorization Code + PKCE flow and validates state', async () => {
-    const oidc = new OidcAuthProviderAdapter();
+    // Fail closed if SHA-256 is unavailable
+    await expect(
+      generatePkcePair({
+        getRandomBytes: (len) => new Uint8Array(len),
+        sha256: async () => {
+          throw new Error('Crypto unavailable');
+        },
+      })
+    ).rejects.toThrow(/Crypto unavailable/);
+
+    // Create a valid 3-part JWT ID token and verify claims
+    const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString(
+      'base64url'
+    );
+    const payload = Buffer.from(
+      JSON.stringify({
+        iss: 'https://idp.example.com',
+        aud: 'expo-mobile-client',
+        sub: 'usr_oidc_99',
+        email: 'oidc@expo.dev',
+        email_verified: true,
+        nonce: pkce.nonce,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+    ).toString('base64url');
+    const validIdToken = `${header}.${payload}.sig_verified`;
+
+    const claims = validateIdTokenClaims(validIdToken, {
+      issuer: 'https://idp.example.com',
+      clientId: 'expo-mobile-client',
+      nonce: pkce.nonce,
+    });
+    expect(claims.sub).toBe('usr_oidc_99');
+
+    const oidc = new OidcAuthProviderAdapter({
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'oidc_at_1',
+          refresh_token: 'oidc_rt_1',
+          id_token: validIdToken,
+          expires_in: 3600,
+        }),
+      }),
+    });
+
     await oidc.initialize({
       type: 'oidc',
-      clientId: 'mobile-app',
-      discoveryUrl: 'https://idp.example.com',
-      redirectUri: 'expofoundation://auth/callback',
+      issuer: 'https://idp.example.com',
+      clientId: 'expo-mobile-client',
+      redirectUri: 'efauth://callback',
     });
 
     const authReq = await oidc.createAuthorizationRequest();
     expect(authReq.AuthorizationUrl).toContain('code_challenge_method=S256');
-    expect(authReq.codeVerifier.length).toBeGreaterThanOrEqual(32);
+    expect(authReq.AuthorizationUrl).toContain(`nonce=${authReq.nonce}`);
 
-    // Mismatched state must be rejected
     await expect(
       oidc.exchangeAuthorizationCode({
-        code: 'code_123',
+        code: 'auth_code_123',
         state: 'tampered_state',
         expectedState: authReq.state,
         codeVerifier: authReq.codeVerifier,
         redirectUri: authReq.redirectUri,
       })
-    ).rejects.toThrow(/state validation failed/i);
+    ).rejects.toThrow(/OAuth state mismatch/);
 
-    // Valid PKCE & state succeeds
-    const validResult = await oidc.exchangeAuthorizationCode({
-      code: 'code_123',
+    // Exchange with matching state & nonce
+    const payloadWithReqNonce = Buffer.from(
+      JSON.stringify({
+        iss: 'https://idp.example.com',
+        aud: 'expo-mobile-client',
+        sub: 'usr_oidc_99',
+        email: 'oidc@expo.dev',
+        email_verified: true,
+        nonce: authReq.nonce,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })
+    ).toString('base64url');
+    const idTokenForReq = `${header}.${payloadWithReqNonce}.sig_verified`;
+
+    const oidcWithToken = new OidcAuthProviderAdapter({
+      fetchImpl: async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          access_token: 'oidc_at_1',
+          id_token: idTokenForReq,
+          expires_in: 3600,
+        }),
+      }),
+    });
+    await oidcWithToken.initialize({
+      type: 'oidc',
+      issuer: 'https://idp.example.com',
+      clientId: 'expo-mobile-client',
+      redirectUri: 'efauth://callback',
+    });
+
+    const exchanged = await oidcWithToken.exchangeAuthorizationCode({
+      code: 'auth_code_123',
       state: authReq.state,
       expectedState: authReq.state,
+      expectedNonce: authReq.nonce,
       codeVerifier: authReq.codeVerifier,
       redirectUri: authReq.redirectUri,
     });
-    expect(validResult.status).toBe('authenticated');
-    expect(validResult.session?.provider).toBe('oidc');
+    expect(exchanged.status).toBe('authenticated');
+    expect(exchanged.user?.id).toBe('usr_oidc_99');
   });
 
-  it('runs standalone AuthController in Auth-Only mode without Navigation Builder', async () => {
-    const compiled = defaultFoundationCompiler.compile({ auth: authOnlyJson });
-    expect(compiled.canGenerate).toBe(true);
-    expect(compiled.ir?.projectMetadata.mode).toBe('auth-only');
-    expect(compiled.ir?.navigation).toBeNull();
+  it('supports Apple and Supabase SDK drivers and fails closed when unconfigured (Finding 5)', async () => {
+    const unconfiguredSupabase = new SupabaseAuthProviderAdapter();
+    await unconfiguredSupabase.initialize({ type: 'supabase' });
+    await expect(
+      unconfiguredSupabase.signIn({ email: 'a@b.com', password: 'pw' })
+    ).rejects.toThrow(/requires a configured SupabaseAuthSdkDriver/);
 
-    const adapter = new RestAuthProviderAdapter({
-      httpClient: async (req) => ({
-        status: 200,
-        ok: true,
-        data: {
-          data: {
-            access_token: 'tok_standalone',
-            refresh_token: 'ref_standalone',
-            expires_in: 3600,
-            verification_required: req.url.endsWith('/register'),
-            user: {
-              id: 'u_standalone',
-              email: 'solo@expo.dev',
-              roles: ['admin'],
-              permissions: ['users.manage'],
-              emailVerified: !req.url.endsWith('/register'),
-            },
-          },
-        },
-      }),
+    const apple = new AppleAuthProviderAdapter({
+      driver: {
+        isAvailableAsync: async () => true,
+        signInAsync: async () => ({
+          user: 'apple_usr_01',
+          identityToken: 'apple_jwt_id_token',
+          email: 'apple@privaterelay.appleid.com',
+        }),
+      },
     });
-
-    const controller = new AuthController({
-      authIR: compiled.ir!.auth!,
-      adapter,
-    });
-
-    await controller.initialize();
-    expect(controller.getState().status).toBe('anonymous');
-
-    await controller.signIn({ email: 'solo@expo.dev', password: 'secret' });
-    expect(controller.getState().status).toBe('authenticated');
-    expect(controller.getAccessContext().roles).toContain('admin');
-
-    await controller.signOut();
-    expect(controller.getState().status).toBe('anonymous');
-    expect(controller.getAccessContext().authenticated).toBe(false);
+    await apple.initialize({ type: 'apple' });
+    const appleRes = await apple.signIn({});
+    expect(appleRes.status).toBe('authenticated');
+    expect(appleRes.user?.id).toBe('apple_usr_01');
   });
 });

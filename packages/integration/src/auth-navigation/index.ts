@@ -1,328 +1,252 @@
-import type { AuthController } from '@expo-foundation/auth';
-import type { FlowRegistry, FoundationEventBus } from '@expo-foundation/contracts';
-import type { AccessContext, IntegrationIR } from '@expo-foundation/core';
+/**
+ * @expo-foundation/integration - Auth-Navigation Coordinator & Bridge
+ *
+ * Implements Section 15 (Auth-Navigation Integration Engine) & Audit Finding 12:
+ * - Coordinates AuthController, NavigationStateManager, DeepLinkManager, and RouteGuardManager
+ * - Single-owner `flowRef` execution per event envelope via `eventBus.claimFlowDispatch`
+ *   so external business logic flows are never dispatched twice
+ * - Handles startup session restoration hold (`isNavigationReady`) to prevent initial screen flicker
+ * - Automatically restores deferred deep links after login
+ * - Immediately re-evaluates the current active route when access roles/permissions change
+ */
+
+import {
+  FoundationEventBus,
+  InMemoryFlowRegistry,
+  type FlowRegistry,
+  type FoundationEventEnvelope,
+} from '@expo-foundation/contracts';
+import type { AuthController, AuthRuntimeSnapshot } from '@expo-foundation/auth';
+import type { IntegrationIR, NavigationIR } from '@expo-foundation/core';
 import {
   DeepLinkManager,
-  type NavigationState,
-  type NavigationStateManager,
+  NavigationStateManager,
+  type DeepLinkResolutionResult,
+  type NavigationStateSnapshot,
 } from '@expo-foundation/navigation';
 import { RouteGuardManager } from '../route-guards/index.js';
 
-export class RedirectManager {
-  constructor(
-    private readonly integrationIR: IntegrationIR,
-    private readonly deepLinkManager: DeepLinkManager
-  ) {}
-
-  resolveAuthenticatedEntry(accessContext: AccessContext): string {
-    for (const role of accessContext.roles) {
-      const groupTarget = this.integrationIR.roleRouteGroups[role];
-      if (groupTarget) {
-        return groupTarget;
-      }
-    }
-    return this.integrationIR.entryPoints.authenticatedEntry;
-  }
-
-  resolvePostLoginDestination(accessContext: AccessContext): {
-    routeId: string;
-    params: Record<string, unknown>;
-    restoredFromIntended: boolean;
-  } {
-    const afterLoginPolicy = this.integrationIR.redirects.afterLogin;
-    if (afterLoginPolicy === 'restore-intended-destination') {
-      const intended = this.deepLinkManager.getIntendedDestination();
-      if (intended) {
-        this.deepLinkManager.clearIntendedDestination();
-        return {
-          routeId: intended.routeId,
-          params: intended.params,
-          restoredFromIntended: true,
-        };
-      }
-    } else if (afterLoginPolicy) {
-      return {
-        routeId: afterLoginPolicy,
-        params: {},
-        restoredFromIntended: false,
-      };
-    }
-
-    return {
-      routeId: this.resolveAuthenticatedEntry(accessContext),
-      params: {},
-      restoredFromIntended: false,
-    };
-  }
-}
-
-export interface AuthNavigationBridgeOptions {
-  integrationIR: IntegrationIR;
-  authController: AuthController;
-  navigationStateManager: NavigationStateManager;
-  deepLinkManager?: DeepLinkManager;
-  eventBus?: FoundationEventBus;
-  flowRegistry?: FlowRegistry;
-}
-
 export class AuthNavigationBridge {
-  readonly integrationIR: IntegrationIR;
-  readonly authController: AuthController;
-  readonly navigationStateManager: NavigationStateManager;
-  readonly deepLinkManager: DeepLinkManager;
-  readonly guardManager: RouteGuardManager;
-  readonly redirectManager: RedirectManager;
-  readonly eventBus: FoundationEventBus;
-  readonly flowRegistry: FlowRegistry;
+  private readonly authController: AuthController;
+  private readonly navigationStateManager: NavigationStateManager;
+  private readonly deepLinkManager: DeepLinkManager;
+  private readonly guardManager: RouteGuardManager;
+  private readonly integrationIR: IntegrationIR;
+  private readonly eventBus: FoundationEventBus;
+  private readonly flowRegistry: FlowRegistry;
 
-  private holdingProtectedEntry = false;
+  private navigationReady = false;
   private readonly unsubscribers: Array<() => void> = [];
 
-  constructor(options: AuthNavigationBridgeOptions) {
-    this.integrationIR = options.integrationIR;
+  constructor(options: {
+    authController: AuthController;
+    navigationStateManager: NavigationStateManager;
+    navigationIR: NavigationIR;
+    integrationIR: IntegrationIR;
+    eventBus?: FoundationEventBus;
+    flowRegistry?: FlowRegistry;
+  }) {
     this.authController = options.authController;
     this.navigationStateManager = options.navigationStateManager;
-    this.eventBus = options.eventBus ?? options.authController.eventBus;
-    this.flowRegistry = options.flowRegistry ?? options.authController.flowRegistry;
+    this.integrationIR = options.integrationIR;
+    this.eventBus = options.eventBus ?? new FoundationEventBus();
+    this.flowRegistry = options.flowRegistry ?? new InMemoryFlowRegistry();
 
-    this.deepLinkManager =
-      options.deepLinkManager ??
-      new DeepLinkManager(
-        options.navigationStateManager.registry,
-        options.navigationStateManager,
-        options.navigationStateManager.navigationIR.linking
-      );
+    this.guardManager = new RouteGuardManager(
+      options.navigationIR,
+      options.integrationIR
+    );
+    this.deepLinkManager = new DeepLinkManager({
+      navigationIR: options.navigationIR,
+      stateManager: this.navigationStateManager,
+      eventBus: this.eventBus,
+    });
 
-    this.guardManager = new RouteGuardManager(options.integrationIR);
-    this.redirectManager = new RedirectManager(options.integrationIR, this.deepLinkManager);
-
-    this.attachEventListeners();
-  }
-
-  isHoldingProtectedEntry(): boolean {
-    return this.holdingProtectedEntry;
-  }
-
-  private findEventFlowRef(authEvent: string): string | undefined {
-    return this.integrationIR.eventBindings.find((b) => b.authEvent === authEvent)?.flowRef;
-  }
-
-  private async dispatchBoundFlowIfAny(
-    authEvent: string,
-    payload: Record<string, unknown>
-  ): Promise<void> {
-    const flowRef = this.findEventFlowRef(authEvent);
-    if (flowRef) {
-      await this.flowRegistry.dispatch(flowRef, authEvent, payload);
+    if (this.integrationIR.enabled) {
+      this.attachIntegrationHooks();
+    } else {
+      this.navigationReady = true;
     }
   }
 
-  private attachEventListeners(): void {
-    // 1. auth.session.restoring -> hold protected application entry
-    this.unsubscribers.push(
-      this.eventBus.on('auth.session.restoring', async (env) => {
-        this.holdingProtectedEntry = true;
-        await this.dispatchBoundFlowIfAny('auth.session.restoring', env.payload);
-      })
-    );
+  private attachIntegrationHooks(): void {
+    // 1. Install RouteGuardHook into NavigationStateManager
+    this.navigationStateManager.setGuardHook((routeId, params, context) => {
+      return this.guardManager.evaluateRoute(routeId, params, context);
+    });
 
-    // 2. auth.session.restored -> resolve authenticated entry (or intended destination)
-    this.unsubscribers.push(
-      this.eventBus.on('auth.session.restored', async (env) => {
-        this.holdingProtectedEntry = false;
-        const accessContext = this.authController.getAccessContext();
-        const dest = this.redirectManager.resolvePostLoginDestination(accessContext);
-        if (this.navigationStateManager.registry.has(dest.routeId)) {
-          this.navigationStateManager.reset(dest.routeId, dest.params);
+    // 2. Sync AuthController state changes to NavigationStateManager accessContext
+    const unsubAuth = this.authController.subscribe(
+      (snapshot: AuthRuntimeSnapshot) => {
+        this.navigationStateManager.setAccessContext(snapshot.accessContext);
+
+        if (snapshot.status === 'unknown' || snapshot.status === 'restoring') {
+          this.navigationReady = false;
+        } else {
+          this.navigationReady = true;
         }
-        await this.dispatchBoundFlowIfAny('auth.session.restored', env.payload);
-      })
+      }
     );
+    this.unsubscribers.push(unsubAuth);
 
-    // 3. auth.login.success -> navigate to intended destination or authenticated entry
-    this.unsubscribers.push(
-      this.eventBus.on('auth.login.success', async (env) => {
-        this.holdingProtectedEntry = false;
-        const accessContext = this.authController.getAccessContext();
-        const dest = this.redirectManager.resolvePostLoginDestination(accessContext);
-        if (this.navigationStateManager.registry.has(dest.routeId)) {
-          this.navigationStateManager.reset(dest.routeId, dest.params);
+    // 3. Subscribe to Auth Lifecycle Events on EventBus (deterministic async execution)
+    const unsubEvents = this.eventBus.on('*', async (envelope) => {
+      await this.handleEventEnvelope(envelope);
+    });
+    this.unsubscribers.push(unsubEvents);
+  }
+
+  private async handleEventEnvelope(
+    envelope: FoundationEventEnvelope
+  ): Promise<void> {
+    if (!this.integrationIR.enabled) return;
+
+    const accessCtx = this.authController.getAccessContext();
+    this.navigationStateManager.setAccessContext(accessCtx);
+
+    const customBinding = this.integrationIR.events[envelope.event];
+    // Single-owner flow dispatch deduplication (Audit Finding 12)
+    if (
+      customBinding?.flowRef &&
+      this.eventBus.claimFlowDispatch(envelope.id, customBinding.flowRef)
+    ) {
+      await this.flowRegistry.dispatch(
+        customBinding.flowRef,
+        envelope.event,
+        envelope.payload,
+        envelope.id
+      );
+    }
+
+    switch (envelope.event) {
+      case 'auth.session.restored': {
+        this.navigationReady = true;
+        const restoredLink = this.deepLinkManager.restoreDeferredDeepLink();
+        if (!restoredLink || restoredLink.status !== 'navigated') {
+          const entryTarget =
+            this.guardManager.resolveAuthenticatedEntry(accessCtx) ??
+            this.integrationIR.authenticatedEntry;
+          this.navigationStateManager.reset(entryTarget, {});
         }
-        await this.dispatchBoundFlowIfAny('auth.login.success', env.payload);
-      })
-    );
+        break;
+      }
 
-    // 4. auth.registration.completed -> follow registration policy
-    this.unsubscribers.push(
-      this.eventBus.on('auth.registration.completed', async (env) => {
-        this.holdingProtectedEntry = false;
-        const target = this.integrationIR.redirects.afterRegistration;
-        if (this.navigationStateManager.registry.has(target)) {
-          this.navigationStateManager.navigate(target);
+      case 'auth.login.success': {
+        this.navigationReady = true;
+        if (this.integrationIR.afterLogin === 'restore-intended-destination') {
+          const restored = this.deepLinkManager.restoreDeferredDeepLink();
+          if (restored && restored.status === 'navigated') {
+            break;
+          }
+        } else if (this.integrationIR.afterLogin) {
+          this.navigationStateManager.reset(this.integrationIR.afterLogin, {});
+          break;
         }
-        await this.dispatchBoundFlowIfAny('auth.registration.completed', env.payload);
-      })
-    );
 
-    // 5. auth.verification.required -> navigate to verification reference
-    this.unsubscribers.push(
-      this.eventBus.on('auth.verification.required', async (env) => {
-        this.holdingProtectedEntry = false;
-        const verifyRoute =
-          this.integrationIR.entryPoints.verificationRoute ??
-          this.integrationIR.entryPoints.guestEntry;
-        if (this.navigationStateManager.registry.has(verifyRoute)) {
-          this.navigationStateManager.navigate(verifyRoute);
+        const entryTarget =
+          this.guardManager.resolveAuthenticatedEntry(accessCtx) ??
+          this.integrationIR.authenticatedEntry;
+        this.navigationStateManager.reset(entryTarget, {});
+        break;
+      }
+
+      case 'auth.registration.completed': {
+        const verificationReq = Boolean(envelope.payload.verificationRequired);
+        if (verificationReq && this.integrationIR.afterRegistration) {
+          this.navigationStateManager.replace(
+            this.integrationIR.afterRegistration,
+            {}
+          );
         }
-        await this.dispatchBoundFlowIfAny('auth.verification.required', env.payload);
-      })
-    );
+        break;
+      }
 
-    // 6. auth.session.expired -> reset to guest entry
-    this.unsubscribers.push(
-      this.eventBus.on('auth.session.expired', async (env) => {
-        this.holdingProtectedEntry = false;
+      case 'auth.verification.required': {
         const target =
-          this.integrationIR.entryPoints.sessionExpiredRoute ??
-          this.integrationIR.entryPoints.guestEntry;
-        if (this.navigationStateManager.registry.has(target)) {
-          this.navigationStateManager.reset(target);
+          this.integrationIR.verificationRoute ??
+          this.integrationIR.afterRegistration;
+        if (target) {
+          this.navigationStateManager.replace(target, {});
         }
-        await this.dispatchBoundFlowIfAny('auth.session.expired', env.payload);
-      })
-    );
+        break;
+      }
 
-    // 7. auth.logout.success -> clear authenticated navigation history
-    this.unsubscribers.push(
-      this.eventBus.on('auth.logout.success', async (env) => {
-        this.holdingProtectedEntry = false;
-        this.deepLinkManager.clearIntendedDestination();
+      case 'auth.logout.success': {
+        this.navigationReady = true;
+        this.navigationStateManager.reset(this.integrationIR.afterLogout, {});
+        break;
+      }
+
+      case 'auth.session.expired': {
+        this.navigationReady = true;
         const target =
-          this.integrationIR.redirects.afterLogout ??
-          this.integrationIR.entryPoints.guestEntry;
-        if (this.navigationStateManager.registry.has(target)) {
-          this.navigationStateManager.reset(target);
-        }
-        await this.dispatchBoundFlowIfAny('auth.logout.success', env.payload);
-      })
-    );
+          this.integrationIR.sessionExpiredRoute ??
+          this.integrationIR.guestEntry;
+        this.navigationStateManager.reset(target, {});
+        break;
+      }
 
-    // 8. auth.access.changed -> re-evaluate protected routes
-    this.unsubscribers.push(
-      this.eventBus.on('auth.access.changed', async (env) => {
-        this.reevaluateCurrentRoute();
-        await this.dispatchBoundFlowIfAny('auth.access.changed', env.payload);
-      })
-    );
-
-    // 9. auth.account.suspended -> restrict application access
-    this.unsubscribers.push(
-      this.eventBus.on('auth.account.suspended', async (env) => {
-        this.holdingProtectedEntry = false;
+      case 'auth.account.suspended': {
+        this.navigationReady = true;
         const target =
-          this.integrationIR.entryPoints.accountSuspendedRoute ??
-          this.integrationIR.entryPoints.accessDeniedRoute ??
-          this.integrationIR.entryPoints.guestEntry;
-        if (this.navigationStateManager.registry.has(target)) {
-          this.navigationStateManager.reset(target);
+          this.integrationIR.accountSuspendedRoute ??
+          this.integrationIR.accessDeniedRoute ??
+          this.integrationIR.guestEntry;
+        this.navigationStateManager.reset(target, {});
+        break;
+      }
+
+      case 'auth.access.changed': {
+        // Re-evaluate current route immediately when user roles/permissions change
+        const currentState = this.navigationStateManager.getState();
+        const decision = this.guardManager.evaluateRoute(
+          currentState.currentRouteId,
+          currentState.currentParams,
+          accessCtx
+        );
+        if (!decision.allowed && decision.redirectRouteId) {
+          this.navigationStateManager.replace(decision.redirectRouteId, {});
         }
-        await this.dispatchBoundFlowIfAny('auth.account.suspended', env.payload);
-      })
-    );
+        break;
+      }
+    }
   }
 
   /**
-   * Navigates to a route while enforcing route access policies.
-   * Never displays unauthorized navigation as successful.
+   * Startup initialization sequence (Section 15.2):
+   * Restores session first; if anonymous, resets navigation to guestEntry.
    */
-  navigateGuarded(
-    routeId: string,
-    params: Record<string, unknown> = {}
-  ): {
-    allowed: boolean;
-    activeRouteId: string;
-    redirectedTo?: string;
-    reason: string;
-    state: NavigationState;
-  } {
-    const accessContext = this.authController.getAccessContext();
-    const evaluation = this.guardManager.evaluateRoute(routeId, accessContext);
+  async initialize(): Promise<{
+    auth: AuthRuntimeSnapshot;
+    navigation: NavigationStateSnapshot;
+    isNavigationReady: boolean;
+  }> {
+    const authSnap = await this.authController.initialize();
+    this.navigationStateManager.setAccessContext(authSnap.accessContext);
 
-    if (evaluation.allowed) {
-      const state = this.navigationStateManager.navigate(routeId, params);
-      return {
-        allowed: true,
-        activeRouteId: state.activeRouteId,
-        reason: evaluation.reason,
-        state,
-      };
+    if (authSnap.status === 'anonymous') {
+      this.navigationStateManager.reset(this.integrationIR.guestEntry, {});
     }
-
-    if (evaluation.shouldRetainIntendedDestination) {
-      this.deepLinkManager.setIntendedDestination(routeId, params);
-    }
-
-    const fallbackRouteId =
-      evaluation.redirectRouteId ?? this.integrationIR.entryPoints.guestEntry;
-
-    this.eventBus.emit(
-      'nav.guard.blocked',
-      {
-        blockedRouteId: routeId,
-        redirectRouteId: fallbackRouteId,
-        reason: evaluation.reason,
-      },
-      { source: 'integration' }
-    );
-
-    let state = this.navigationStateManager.getState();
-    if (
-      this.navigationStateManager.registry.has(fallbackRouteId) &&
-      state.activeRouteId !== fallbackRouteId
-    ) {
-      state = this.navigationStateManager.navigate(fallbackRouteId);
-    }
+    this.navigationReady = true;
 
     return {
-      allowed: false,
-      activeRouteId: state.activeRouteId,
-      redirectedTo: fallbackRouteId,
-      reason: evaluation.reason,
-      state,
+      auth: authSnap,
+      navigation: this.navigationStateManager.getState(),
+      isNavigationReady: this.navigationReady,
     };
   }
 
-  handleDeepLink(url: string) {
+  handleDeepLink(url: string): DeepLinkResolutionResult {
     return this.deepLinkManager.handleIncomingUrl(url, {
-      accessContext: this.authController.getAccessContext(),
-      guestEntryRouteId: this.integrationIR.entryPoints.guestEntry,
+      guestEntryRouteId: this.integrationIR.guestEntry,
+      authenticatedEntryRouteId: this.integrationIR.authenticatedEntry,
+      verificationRouteId: this.integrationIR.verificationRoute,
+      accessDeniedRouteId: this.integrationIR.accessDeniedRoute,
     });
   }
 
-  reevaluateCurrentRoute(): {
-    allowed: boolean;
-    redirectedTo?: string;
-  } {
-    const current = this.navigationStateManager.getState();
-    const accessContext = this.authController.getAccessContext();
-    const evaluation = this.guardManager.evaluateRoute(
-      current.activeRouteId,
-      accessContext
-    );
-
-    if (evaluation.allowed) {
-      return { allowed: true };
-    }
-
-    const redirectRouteId =
-      evaluation.redirectRouteId ?? this.integrationIR.entryPoints.guestEntry;
-    if (this.navigationStateManager.registry.has(redirectRouteId)) {
-      this.navigationStateManager.replace(redirectRouteId);
-    }
-    return {
-      allowed: false,
-      redirectedTo: redirectRouteId,
-    };
+  isNavigationReady(): boolean {
+    return this.navigationReady;
   }
 
   dispose(): void {
@@ -333,121 +257,66 @@ export class AuthNavigationBridge {
   }
 }
 
-export interface GeneratedIntegrationFile {
-  path: string;
-  content: string;
-  ownership: 'generated';
-}
+export { AuthNavigationBridge as AuthNavigationCoordinator };
 
-const GENERATED_HEADER = `/**
- * @generated by @expo-foundation/integration
- * DO NOT EDIT MANUALLY — deterministic output from integration.json via Canonical IntegrationIR.
- */`;
-
-export function generateIntegrationFiles(
-  integrationIR: IntegrationIR
-): GeneratedIntegrationFile[] {
-  return [
-    {
-      path: 'src/foundation/config/integration.generated.ts',
-      ownership: 'generated',
-      content: `${GENERATED_HEADER}
-
-export const INTEGRATION_CONFIG = ${JSON.stringify(integrationIR, null, 2)} as const;
-export type GeneratedIntegrationConfig = typeof INTEGRATION_CONFIG;
+export function generateIntegrationModuleFiles(
+  ir: IntegrationIR
+): Record<string, string> {
+  return {
+    'src/foundation/integration/integration.config.ts': `/**
+ * GENERATED BY @expo-foundation/integration - DO NOT EDIT MANUALLY
+ */
+export const INTEGRATION_IR = ${JSON.stringify(ir, null, 2)} as const;
 `,
-    },
-    {
-      path: 'src/foundation/integration/RouteGuardManager.ts',
-      ownership: 'generated',
-      content: `${GENERATED_HEADER}
-import { INTEGRATION_CONFIG } from '../config/integration.generated';
-import type { AccessContext } from '../auth/AuthStateMachine';
+    'src/foundation/integration/AuthNavigationGate.tsx': `/**
+ * GENERATED BY @expo-foundation/integration - DO NOT EDIT MANUALLY
+ */
+import React, { useEffect } from 'react';
+import { ActivityIndicator, View, StyleSheet } from 'react-native';
+import { useAuth } from '../auth/AuthProvider';
+import { useFoundationNavigation } from '../navigation/NavigationProvider';
+import { INTEGRATION_IR } from './integration.config';
 
-export class GeneratedRouteGuardManager {
-  readonly guards = INTEGRATION_CONFIG.guards;
+export function AuthNavigationGate({ children }: { children: React.ReactNode }) {
+  const auth = useAuth();
+  const nav = useFoundationNavigation();
 
-  canAccess(routeId: string, context: AccessContext): { allowed: boolean; redirectRouteId?: string } {
-    const rule = this.guards.find((g) => g.routeId === routeId);
-    if (!rule || rule.policy === 'public') {
-      return { allowed: true };
-    }
-    if (rule.policy === 'guest') {
-      return context.authenticated
-        ? { allowed: false, redirectRouteId: INTEGRATION_CONFIG.entryPoints.authenticatedEntry }
-        : { allowed: true };
-    }
-    if (!context.authenticated) {
-      return { allowed: false, redirectRouteId: INTEGRATION_CONFIG.entryPoints.guestEntry };
-    }
-    if (rule.policy === 'verified' && !context.verified) {
-      return {
-        allowed: false,
-        redirectRouteId:
-          INTEGRATION_CONFIG.entryPoints.verificationRoute ??
-          INTEGRATION_CONFIG.entryPoints.guestEntry,
-      };
-    }
-    if (typeof rule.policy === 'object' && 'roles' in rule.policy) {
-      const roles = rule.policy.roles as readonly string[];
-      const mode = rule.policy.mode ?? 'any';
-      const ok =
-        mode === 'all'
-          ? roles.every((r) => context.roles.includes(r))
-          : roles.some((r) => context.roles.includes(r));
-      return ok ? { allowed: true } : { allowed: false, redirectRouteId: rule.redirectOnDeny };
-    }
-    if (typeof rule.policy === 'object' && 'permissions' in rule.policy) {
-      const perms = rule.policy.permissions as readonly string[];
-      const mode = rule.policy.mode ?? 'any';
-      const ok =
-        mode === 'all'
-          ? perms.every((p) => context.permissions.includes(p))
-          : perms.some((p) => context.permissions.includes(p));
-      return ok ? { allowed: true } : { allowed: false, redirectRouteId: rule.redirectOnDeny };
-    }
-    return { allowed: true };
-  }
-}
-`,
-    },
-    {
-      path: 'src/foundation/integration/RedirectManager.ts',
-      ownership: 'generated',
-      content: `${GENERATED_HEADER}
-import { INTEGRATION_CONFIG } from '../config/integration.generated';
-import { deepLinkManager } from '../navigation/DeepLinkManager';
+  useEffect(() => {
+    if (!INTEGRATION_IR.enabled) return;
+    if (auth.status === 'unknown' || auth.status === 'restoring') return;
 
-export class GeneratedRedirectManager {
-  resolveAfterLogin(): { routeId: string; params: Record<string, unknown> } {
-    if (INTEGRATION_CONFIG.redirects.afterLogin === 'restore-intended-destination') {
-      const intended = deepLinkManager.consumeIntendedDestination();
-      if (intended) {
-        return intended;
+    if (auth.status === 'anonymous') {
+      nav.reset(INTEGRATION_IR.guestEntry);
+    } else if (auth.status === 'verifying') {
+      if (INTEGRATION_IR.verificationRoute) {
+        nav.replace(INTEGRATION_IR.verificationRoute);
       }
+    } else if (auth.status === 'authenticated') {
+      nav.reset(INTEGRATION_IR.authenticatedEntry);
     }
-    return {
-      routeId: INTEGRATION_CONFIG.entryPoints.authenticatedEntry,
-      params: {},
-    };
-  }
-}
-`,
-    },
-    {
-      path: 'src/foundation/integration/AuthNavigationBridge.ts',
-      ownership: 'generated',
-      content: `${GENERATED_HEADER}
-import { INTEGRATION_CONFIG } from '../config/integration.generated';
-import { GeneratedRouteGuardManager } from './RouteGuardManager';
-import { GeneratedRedirectManager } from './RedirectManager';
+  }, [auth.status]);
 
-export class GeneratedAuthNavigationBridge {
-  readonly guardManager = new GeneratedRouteGuardManager();
-  readonly redirectManager = new GeneratedRedirectManager();
-  readonly config = INTEGRATION_CONFIG;
+  if (INTEGRATION_IR.enabled && (auth.status === 'unknown' || auth.status === 'restoring')) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" />
+      </View>
+    );
+  }
+
+  return <>{children}</>;
 }
+
+const styles = StyleSheet.create({
+  loadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+});
 `,
-    },
-  ];
+    'src/foundation/integration/index.ts': `export * from './integration.config';
+export * from './AuthNavigationGate';
+`,
+  };
 }

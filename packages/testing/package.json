@@ -1,0 +1,15 @@
+{
+  "name": "@expo-foundation/testing",
+  "version": "1.0.0",
+  "description": "Isolated test-only mock providers, sessions, challenges, and screen fixtures (never bundled in production runtimes)",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@expo-foundation/contracts": "*",
+    "@expo-foundation/core": "*"
+  }
+}

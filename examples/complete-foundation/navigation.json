@@ -7,197 +7,204 @@
   "platforms": {
     "ios": {
       "renderer": "expo-ui",
-      "strictNative": true
+      "strictNative": true,
+      "mode": "strict-native"
     },
     "android": {
       "renderer": "auto",
-      "fallback": "expo-router"
+      "fallback": "expo-router",
+      "mode": "automatic-fallback"
     }
   },
-  "rootNavigator": "root.stack",
+  "rootNavigator": "root-stack",
   "navigators": [
     {
-      "id": "root.stack",
+      "id": "root-stack",
       "type": "stack",
-      "initialRoute": "auth.stack",
+      "initialRoute": "guest-stack",
       "children": [
-        "auth.stack",
-        "app.tabs",
-        "admin.dashboard",
-        "auth.access-denied"
+        "guest-stack",
+        "main-tabs",
+        "admin-dashboard",
+        "access-denied"
       ]
     },
     {
-      "id": "auth.stack",
+      "id": "guest-stack",
       "type": "stack",
-      "initialRoute": "auth.login",
-      "children": [
-        "auth.login",
-        "auth.register",
-        "auth.verify"
-      ]
+      "initialRoute": "login",
+      "children": ["login", "register", "verify-email"]
     },
     {
-      "id": "app.tabs",
+      "id": "main-tabs",
       "type": "tabs",
+      "initialRoute": "home-stack",
+      "children": ["home-stack", "search-stack", "profile-stack"],
       "tabsOptions": {
-        "initialTab": "tab.home.stack",
+        "initialTab": "home-stack",
         "preserveTabState": true,
         "tabs": [
-          { "routeId": "tab.home.stack", "label": "Home", "icon": "house.fill" },
-          { "routeId": "tab.search.stack", "label": "Search", "icon": "magnifyingglass" },
-          { "routeId": "tab.profile.stack", "label": "Profile", "icon": "person.fill" }
+          { "routeId": "home-stack", "label": "Home", "icon": "house.fill" },
+          { "routeId": "search-stack", "label": "Search", "icon": "magnifyingglass" },
+          { "routeId": "profile-stack", "label": "Profile", "icon": "person.crop.circle" }
         ]
-      },
-      "children": [
-        "tab.home.stack",
-        "tab.search.stack",
-        "tab.profile.stack"
-      ]
+      }
     },
     {
-      "id": "tab.home.stack",
+      "id": "home-stack",
       "type": "stack",
-      "initialRoute": "app.home",
-      "children": [
-        "app.home",
-        "app.orders.detail",
-        "app.notifications"
-      ]
+      "initialRoute": "home",
+      "children": ["home", "order-detail", "notifications"]
     },
     {
-      "id": "tab.search.stack",
+      "id": "search-stack",
       "type": "stack",
-      "initialRoute": "app.search",
-      "children": [
-        "app.search",
-        "app.products.detail"
-      ]
+      "initialRoute": "search",
+      "children": ["search", "product-detail"]
     },
     {
-      "id": "tab.profile.stack",
+      "id": "profile-stack",
       "type": "stack",
-      "initialRoute": "app.profile",
-      "children": [
-        "app.profile",
-        "app.settings"
-      ]
+      "initialRoute": "profile",
+      "children": ["profile", "settings"]
     }
   ],
   "routes": [
     {
-      "id": "auth.login",
+      "id": "login",
+      "name": "Sign In",
       "path": "/login",
       "screenRef": "screen.auth.login",
-      "navigatorId": "auth.stack",
+      "navigatorId": "guest-stack",
       "access": "guest",
       "options": { "title": "Sign In", "headerShown": false }
     },
     {
-      "id": "auth.register",
+      "id": "register",
+      "name": "Create Account",
       "path": "/register",
       "screenRef": "screen.auth.register",
-      "navigatorId": "auth.stack",
+      "navigatorId": "guest-stack",
       "access": "guest",
       "options": { "title": "Create Account" }
     },
     {
-      "id": "auth.verify",
+      "id": "verify-email",
+      "name": "Verify Email",
       "path": "/verify",
       "screenRef": "screen.auth.verify",
-      "navigatorId": "auth.stack",
+      "navigatorId": "guest-stack",
       "access": "public",
       "options": { "title": "Verify Email" }
     },
     {
-      "id": "auth.access-denied",
-      "path": "/access-denied",
-      "screenRef": "screen.auth.access-denied",
-      "navigatorId": "root.stack",
-      "access": "public",
-      "options": { "title": "Access Denied" }
-    },
-    {
-      "id": "app.home",
-      "path": "/",
+      "id": "home",
+      "name": "Home",
+      "path": "/home",
       "screenRef": "screen.app.home",
-      "navigatorId": "tab.home.stack",
+      "navigatorId": "home-stack",
       "access": "authenticated",
-      "options": { "title": "Home" }
+      "options": { "title": "Home", "tabLabel": "Home", "tabIcon": "house.fill" }
     },
     {
-      "id": "app.orders.detail",
+      "id": "order-detail",
+      "name": "Order Details",
       "path": "/orders/:orderId",
       "screenRef": "screen.app.order-detail",
-      "navigatorId": "tab.home.stack",
-      "access": "authenticated",
+      "navigatorId": "home-stack",
+      "access": {
+        "permissions": ["orders.read"],
+        "mode": "all"
+      },
       "params": {
-        "orderId": { "type": "string", "required": true, "source": "path" }
+        "orderId": { "type": "string", "required": true },
+        "tab": {
+          "type": "enum",
+          "required": false,
+          "default": "summary",
+          "enumValues": ["summary", "items", "shipment", "tracking"]
+        }
       },
       "deepLink": {
         "enabled": true,
+        "aliases": ["/order/:orderId"],
         "universalLink": true
       },
       "options": { "title": "Order Details" }
     },
     {
-      "id": "app.notifications",
+      "id": "notifications",
+      "name": "Notifications",
       "path": "/notifications",
       "screenRef": "screen.app.notifications",
-      "navigatorId": "tab.home.stack",
+      "navigatorId": "home-stack",
       "access": "authenticated",
       "options": { "title": "Notifications" }
     },
     {
-      "id": "app.search",
+      "id": "search",
+      "name": "Search",
       "path": "/search",
       "screenRef": "screen.app.search",
-      "navigatorId": "tab.search.stack",
+      "navigatorId": "search-stack",
       "access": "authenticated",
-      "options": { "title": "Search" }
+      "options": { "title": "Search", "tabLabel": "Search", "tabIcon": "magnifyingglass" }
     },
     {
-      "id": "app.products.detail",
+      "id": "product-detail",
+      "name": "Product Detail",
       "path": "/products/:productId",
       "screenRef": "screen.app.product-detail",
-      "navigatorId": "tab.search.stack",
-      "access": "authenticated",
+      "navigatorId": "search-stack",
+      "access": "public",
       "params": {
-        "productId": { "type": "string", "required": true, "source": "path" }
+        "productId": { "type": "string", "required": true }
       },
       "options": { "title": "Product Detail" }
     },
     {
-      "id": "app.profile",
+      "id": "profile",
+      "name": "Profile",
       "path": "/profile",
       "screenRef": "screen.app.profile",
-      "navigatorId": "tab.profile.stack",
+      "navigatorId": "profile-stack",
       "access": "authenticated",
-      "options": { "title": "Profile" }
+      "options": { "title": "Profile", "tabLabel": "Profile", "tabIcon": "person.crop.circle" }
     },
     {
-      "id": "app.settings",
+      "id": "settings",
+      "name": "Settings",
       "path": "/settings",
       "screenRef": "screen.app.settings",
-      "navigatorId": "tab.profile.stack",
+      "navigatorId": "profile-stack",
       "access": "verified",
-      "options": { "title": "Account Settings" }
+      "options": { "title": "Settings" }
     },
     {
-      "id": "admin.dashboard",
+      "id": "admin-dashboard",
+      "name": "Admin Dashboard",
       "path": "/admin",
       "screenRef": "screen.admin.dashboard",
-      "navigatorId": "root.stack",
+      "navigatorId": "root-stack",
       "access": {
         "roles": ["admin"],
         "mode": "any"
       },
       "options": { "title": "Admin Dashboard" }
+    },
+    {
+      "id": "access-denied",
+      "name": "Access Denied",
+      "path": "/access-denied",
+      "screenRef": "screen.auth.access-denied",
+      "navigatorId": "root-stack",
+      "access": "public",
+      "options": { "title": "Access Denied" }
     }
   ],
   "linking": {
-    "scheme": "expofoundation",
-    "hosts": ["example.com", "app.example.com"],
+    "scheme": "efshop",
+    "hosts": ["shop.expo-foundation.dev"],
     "universalLinks": true,
     "androidAppLinks": true
   }

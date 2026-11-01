@@ -1,177 +1,388 @@
-import type { ScreenRegistry } from '@expo-foundation/contracts';
-import type { NavigationState, NavigationStateManager } from '../runtime/state-manager.js';
+/**
+ * @expo-foundation/navigation - iOS SwiftUI Native Renderer Adapter
+ *
+ * Implements Section 9.1, Section 13.1, and Audit Findings 3 & 11:
+ * - Maps NavigationIR primitives to @expo/ui/swift-ui (Host, NavigationStack,
+ *   NavigationDestination, NavigationLink, TabView, NavigationSplitView, Toolbar, BottomSheet)
+ * - Uses 2-argument `createStandardRouterNavigator(NavigatorContent, StackRouter)` and
+ *   `createStandardRouterNavigator(TabsNavigatorContent, TabRouter)` from `expo-router`
+ * - Maps route `descriptors` to `<NavigationDestination>`
+ * - Reconciles full controlled `path` sequences via `reconcilePathSequence`
+ */
 
-export interface IOSNavigationStackDescriptor {
-  component: 'NavigationStack';
-  importSource: '@expo/ui/swift-ui';
+import type { NavigationIR, NavigatorIR } from '@expo-foundation/core';
+import type { NativeNavigationRenderer } from '../runtime/renderer-contract.js';
+import type {
+  NavigationStateManager,
+  NavigationStateSnapshot,
+} from '../runtime/state-manager.js';
+
+export interface IOSNavigationDescriptor {
+  navigatorId: string;
+  swiftUIComponent:
+    | 'NavigationStack'
+    | 'TabView'
+    | 'NavigationSplitView'
+    | 'BottomSheet';
+  hostComponent: 'Host';
   routerFactory: 'createStandardRouterNavigator';
-  rootRouteId: string;
+  routerType: 'StackRouter' | 'TabRouter';
   controlledPath: string[];
   activeRouteId: string;
-  activeScreenRef: string;
-  params: Record<string, unknown>;
-  toolbar: {
-    visible: boolean;
+  selectedTab?: string;
+  destinations: Array<{
+    routeId: string;
+    screenRef: string;
     title: string;
-    backButtonBehavior: 'default' | 'minimal' | 'none';
-  };
-  interactiveSwipeBackEnabled: boolean;
-}
-
-export interface IOSTabViewDescriptor {
-  component: 'TabView';
-  importSource: '@expo/ui/swift-ui';
-  selectedTab: string;
-  tabs: Array<{
-    tabId: string;
-    label: string;
-    systemImage: string;
-    badge?: string | number;
-    stackPath: string[];
-    activeRouteId: string;
+    headerVisible: boolean;
   }>;
 }
 
-/**
- * IOSNativeNavigationAdapter
- *
- * Bridges Expo Router custom navigator state (createStandardRouterNavigator / integrateWithRouter)
- * with @expo/ui/swift-ui NavigationStack, TabView, NavigationSplitView, Toolbar, and BottomSheet.
- */
-export class IOSNativeNavigationAdapter {
+export class IOSNativeNavigationAdapter implements NativeNavigationRenderer {
   readonly platform = 'ios' as const;
+  readonly engine = 'expo-ui-swiftui';
 
-  constructor(
-    private readonly stateManager: NavigationStateManager,
-    private readonly screenRegistry?: ScreenRegistry
-  ) {}
+  private readonly ir: NavigationIR;
+  private readonly stateManager: NavigationStateManager;
+
+  constructor(ir: NavigationIR, stateManager: NavigationStateManager) {
+    this.ir = ir;
+    this.stateManager = stateManager;
+  }
+
+  renderNavigatorHierarchy(ir: NavigationIR, state: NavigationStateSnapshot) {
+    return {
+      platform: 'ios' as const,
+      rootNavigatorId: ir.rootNavigator,
+      activeRouteId: state.currentRouteId,
+      hostComponent: 'Host' as const,
+    };
+  }
 
   /**
-   * Produces the controlled SwiftUI NavigationStack descriptor for the current state.
+   * Builds a SwiftUI NavigationStack / TabView / NavigationSplitView descriptor
+   * synchronized with the current NavigationStateSnapshot.
    */
-  getNavigationStackDescriptor(navigatorId?: string): IOSNavigationStackDescriptor {
-    const state = this.stateManager.getState();
-    const targetNavId = navigatorId ?? state.activeNavigatorId;
-    const navDef = this.stateManager.graph.getNavigator(targetNavId);
-    const activeRoute = this.stateManager.registry.getById(state.activeRouteId);
+  getNavigatorDescriptor(navigatorId: string): IOSNavigationDescriptor {
+    const nav = this.ir.navigators[navigatorId];
+    if (!nav) {
+      throw new Error(`Navigator "${navigatorId}" not found in NavigationIR.`);
+    }
 
-    const historyRouteIds = state.history.map((h) => h.routeId);
-    const rootRouteId = historyRouteIds[0] ?? state.activeRouteId;
-    const controlledPath = historyRouteIds.slice(1);
+    const state = this.stateManager.getState();
+    const controlledPath = state.history
+      .slice(1)
+      .map((entry) => entry.routeId);
+
+    const swiftUIComponent = this.mapNavigatorToSwiftUI(nav);
+    const routerType = nav.type === 'tabs' ? 'TabRouter' : 'StackRouter';
+
+    const destinations = nav.childRoutes
+      .map((routeId) => this.ir.routes[routeId])
+      .filter((r): r is NonNullable<typeof r> => Boolean(r))
+      .map((route) => ({
+        routeId: route.id,
+        screenRef: route.screenRef,
+        title: route.options.title ?? route.name,
+        headerVisible:
+          route.options.headerShown ?? nav.stackOptions?.headerVisible ?? true,
+      }));
 
     return {
-      component: 'NavigationStack',
-      importSource: '@expo/ui/swift-ui',
+      navigatorId: nav.id,
+      swiftUIComponent,
+      hostComponent: 'Host',
       routerFactory: 'createStandardRouterNavigator',
-      rootRouteId,
+      routerType,
       controlledPath,
-      activeRouteId: state.activeRouteId,
-      activeScreenRef: activeRoute?.screenRef ?? 'screen.unknown',
-      params: state.params ?? {},
-      toolbar: {
-        visible:
-          activeRoute?.options.headerShown ??
-          navDef?.stackOptions?.headerVisible ??
-          true,
-        title:
-          activeRoute?.options.title ??
-          navDef?.stackOptions?.headerTitle ??
-          activeRoute?.name ??
-          state.activeRouteId,
-        backButtonBehavior: navDef?.stackOptions?.backButtonBehavior ?? 'default',
+      activeRouteId: state.currentRouteId,
+      selectedTab: state.navigatorStates[navigatorId]?.selectedTab,
+      destinations,
+    };
+  }
+
+  /**
+   * Handles native SwiftUI NavigationStack `onPathChange` events by reconciling the full
+   * route sequence (including root + pushed path entries) against `NavigationStateManager`
+   * (Audit Finding 11).
+   *
+   * Note: `newPathRouteIds` represents the pushed stack path after the root entry, or a full
+   * sequence if `includeRoot` is true.
+   */
+  onNativePathChange(
+    newPathRouteIds: string[],
+    options?: {
+      includeRoot?: boolean;
+      paramsByIndex?: Record<number, Record<string, unknown>>;
+    }
+  ): NavigationStateSnapshot {
+    const currentState = this.stateManager.getState();
+    const rootEntry = currentState.history[0];
+
+    const fullSequence = options?.includeRoot
+      ? newPathRouteIds
+      : rootEntry
+        ? [rootEntry.routeId, ...newPathRouteIds]
+        : newPathRouteIds;
+
+    return this.stateManager.reconcilePathSequence(
+      fullSequence,
+      options?.paramsByIndex
+    );
+  }
+
+  private mapNavigatorToSwiftUI(
+    nav: NavigatorIR
+  ): 'NavigationStack' | 'TabView' | 'NavigationSplitView' | 'BottomSheet' {
+    switch (nav.type) {
+      case 'stack':
+        return 'NavigationStack';
+      case 'tabs':
+        return 'TabView';
+      case 'split':
+      case 'drawer':
+        return 'NavigationSplitView';
+      case 'modal':
+        return 'BottomSheet';
+    }
+  }
+}
+
+/**
+ * Generates the iOS SwiftUI NativeStack and NativeTabs renderer modules for Expo SDK 58
+ * (Section 13.1 & Audit Finding 3).
+ */
+export function generateIOSRendererModules(ir: NavigationIR): Record<string, string> {
+  const stackModule = `import React, { useMemo, useCallback } from 'react';
+import {
+  Host,
+  NavigationStack,
+  NavigationDestination,
+  Toolbar,
+} from '@expo/ui/swift-ui';
+import {
+  createStandardRouterNavigator,
+  StackRouter,
+  useNavigationBuilder,
+} from 'expo-router';
+
+export interface IOSNativeStackProps {
+  navigatorId: string;
+  initialRouteName?: string;
+  headerVisible?: boolean;
+  headerTitle?: string;
+}
+
+function IOSNativeStackNavigator({
+  initialRouteName,
+  headerVisible = true,
+  headerTitle,
+  children,
+}: React.PropsWithChildren<IOSNativeStackProps>) {
+  const { state, descriptors, navigation, NavigationContent } = useNavigationBuilder(
+    StackRouter,
+    {
+      children,
+      initialRouteName,
+    }
+  );
+
+  const rootRoute = state.routes[0];
+  const rootDescriptor = rootRoute ? descriptors[rootRoute.key] : undefined;
+
+  const controlledPath = useMemo(
+    () => state.routes.slice(1).map((r) => r.name),
+    [state.routes]
+  );
+
+  const handlePathChange = useCallback(
+    (nextPath: string[]) => {
+      const currentDepth = state.routes.length - 1;
+      if (nextPath.length < currentDepth) {
+        const popCount = currentDepth - nextPath.length;
+        for (let i = 0; i < popCount; i += 1) {
+          if (navigation.canGoBack()) {
+            navigation.goBack();
+          }
+        }
+      }
+    },
+    [state.routes, navigation]
+  );
+
+  return (
+    <NavigationContent>
+      <Host style={{ flex: 1 }}>
+        <NavigationStack path={controlledPath} onPathChange={handlePathChange}>
+          {headerVisible && headerTitle ? <Toolbar title={headerTitle} /> : null}
+          {rootDescriptor ? rootDescriptor.render() : null}
+          {Object.values(descriptors).map((descriptor) => (
+            <NavigationDestination
+              key={descriptor.route.key}
+              id={descriptor.route.name}
+            >
+              {descriptor.render()}
+            </NavigationDestination>
+          ))}
+        </NavigationStack>
+      </Host>
+    </NavigationContent>
+  );
+}
+
+export const IOSNativeStack = createStandardRouterNavigator(
+  IOSNativeStackNavigator,
+  StackRouter
+);
+`;
+
+  const tabsModule = `import React from 'react';
+import { Host, TabView } from '@expo/ui/swift-ui';
+import {
+  createStandardRouterNavigator,
+  TabRouter,
+  useNavigationBuilder,
+} from 'expo-router';
+
+export interface IOSNativeTabConfig {
+  routeId: string;
+  label: string;
+  icon: string;
+  badge?: string | number;
+}
+
+export interface IOSNativeTabsProps {
+  navigatorId: string;
+  initialRouteName?: string;
+  tabs: IOSNativeTabConfig[];
+}
+
+function IOSNativeTabsNavigator({
+  initialRouteName,
+  tabs,
+  children,
+}: React.PropsWithChildren<IOSNativeTabsProps>) {
+  const { state, descriptors, navigation, NavigationContent } = useNavigationBuilder(
+    TabRouter,
+    {
+      children,
+      initialRouteName,
+    }
+  );
+
+  const activeRoute = state.routes[state.index];
+
+  return (
+    <NavigationContent>
+      <Host style={{ flex: 1 }}>
+        <TabView
+          selection={activeRoute?.name}
+          onSelectionChange={(nextRouteName: string) => {
+            navigation.navigate(nextRouteName);
+          }}
+        >
+          {state.routes.map((route) => {
+            const tabMeta = tabs.find((t) => t.routeId === route.name);
+            const descriptor = descriptors[route.key];
+            return (
+              <TabView.Tab
+                key={route.key}
+                id={route.name}
+                title={tabMeta?.label ?? descriptor?.options?.title ?? route.name}
+                systemImage={tabMeta?.icon ?? 'circle'}
+                badge={tabMeta?.badge}
+              >
+                {descriptor ? descriptor.render() : null}
+              </TabView.Tab>
+            );
+          })}
+        </TabView>
+      </Host>
+    </NavigationContent>
+  );
+}
+
+export const IOSNativeTabs = createStandardRouterNavigator(
+  IOSNativeTabsNavigator,
+  TabRouter
+);
+`;
+
+  const splitModule = `import React from 'react';
+import { Host, NavigationSplitView } from '@expo/ui/swift-ui';
+import {
+  createStandardRouterNavigator,
+  StackRouter,
+  useNavigationBuilder,
+} from 'expo-router';
+
+export interface IOSNativeSplitViewProps {
+  navigatorId: string;
+  initialRouteName?: string;
+  columnMode?: 'two-column' | 'three-column';
+}
+
+function IOSNativeSplitViewNavigator({
+  initialRouteName,
+  columnMode = 'two-column',
+  children,
+}: React.PropsWithChildren<IOSNativeSplitViewProps>) {
+  const { state, descriptors, NavigationContent } = useNavigationBuilder(
+    StackRouter,
+    {
+      children,
+      initialRouteName,
+    }
+  );
+
+  const sidebarRoute = state.routes[0];
+  const detailRoute = state.routes[state.index] ?? sidebarRoute;
+
+  return (
+    <NavigationContent>
+      <Host style={{ flex: 1 }}>
+        <NavigationSplitView columns={columnMode === 'three-column' ? 3 : 2}>
+          <NavigationSplitView.Sidebar>
+            {sidebarRoute && descriptors[sidebarRoute.key]
+              ? descriptors[sidebarRoute.key].render()
+              : null}
+          </NavigationSplitView.Sidebar>
+          <NavigationSplitView.Detail>
+            {detailRoute && descriptors[detailRoute.key]
+              ? descriptors[detailRoute.key].render()
+              : null}
+          </NavigationSplitView.Detail>
+        </NavigationSplitView>
+      </Host>
+    </NavigationContent>
+  );
+}
+
+export const IOSNativeSplitView = createStandardRouterNavigator(
+  IOSNativeSplitViewNavigator,
+  StackRouter
+);
+`;
+
+  return {
+    'src/foundation/navigation/renderers/ios/NativeStack.ios.tsx': stackModule,
+    'src/foundation/navigation/renderers/ios/NativeTabs.ios.tsx': tabsModule,
+    'src/foundation/navigation/renderers/ios/NativeSplitView.ios.tsx': splitModule,
+    'src/foundation/navigation/renderers/ios/descriptor-manifest.json': JSON.stringify(
+      {
+        sdkVersion: 58,
+        platform: 'ios',
+        mode: ir.iosMode,
+        hostComponent: 'Host',
+        routerIntegration: 'createStandardRouterNavigator',
+        navigators: Object.values(ir.navigators).map((n) => ({
+          id: n.id,
+          type: n.type,
+          capability: n.iosCapability,
+        })),
       },
-      interactiveSwipeBackEnabled:
-        activeRoute?.options.gestureEnabled ??
-        navDef?.stackOptions?.interactiveGestures ??
-        true,
-    };
-  }
-
-  /**
-   * Synchronizes native SwiftUI NavigationStack `onPathChange` updates (including interactive
-   * iOS back-swipe gestures) back into the canonical NavigationStateManager.
-   */
-  onNativePathChange(nextControlledPath: string[]): NavigationState {
-    const state = this.stateManager.getState();
-    const rootRouteId = state.history[0]?.routeId;
-    const fullTargetHistory = rootRouteId
-      ? [rootRouteId, ...nextControlledPath]
-      : [...nextControlledPath];
-
-    const currentHistoryIds = state.history.map((h) => h.routeId);
-
-    if (fullTargetHistory.length < currentHistoryIds.length) {
-      const popCount = currentHistoryIds.length - fullTargetHistory.length;
-      for (let i = 0; i < popCount; i++) {
-        this.stateManager.pop();
-      }
-      return this.stateManager.getState();
-    }
-
-    if (fullTargetHistory.length > currentHistoryIds.length) {
-      const added = fullTargetHistory.slice(currentHistoryIds.length);
-      for (const routeId of added) {
-        this.stateManager.push(routeId);
-      }
-      return this.stateManager.getState();
-    }
-
-    return this.stateManager.getState();
-  }
-
-  /**
-   * Produces the controlled SwiftUI TabView descriptor with per-tab stack history preservation.
-   */
-  getTabViewDescriptor(tabsNavigatorId: string): IOSTabViewDescriptor {
-    const navDef = this.stateManager.graph.getNavigator(tabsNavigatorId);
-    if (!navDef || navDef.type !== 'tabs') {
-      throw new Error(`Navigator "${tabsNavigatorId}" is not a tabs navigator.`);
-    }
-
-    const state = this.stateManager.getState();
-    const selectedTab =
-      state.selectedTab ?? navDef.tabsOptions?.initialTab ?? navDef.children[0];
-
-    const tabs = navDef.children.map((childId) => {
-      const tabConfig = navDef.tabsOptions?.tabs?.find((t) => t.routeId === childId);
-      const tabHistory = state.tabStacks[childId] ?? [];
-      const stackPath =
-        tabHistory.length > 0
-          ? tabHistory.map((h) => h.routeId)
-          : [this.stateManager.graph.resolveInitialRouteId(childId) ?? childId];
-      return {
-        tabId: childId,
-        label: tabConfig?.label ?? childId,
-        systemImage: tabConfig?.icon ?? 'square.grid.2x2',
-        badge: tabConfig?.badge,
-        stackPath,
-        activeRouteId: stackPath[stackPath.length - 1],
-      };
-    });
-
-    return {
-      component: 'TabView',
-      importSource: '@expo/ui/swift-ui',
-      selectedTab,
-      tabs,
-    };
-  }
-
-  /**
-   * Synchronizes native SwiftUI TabView selection changes with the canonical NavigationStateManager.
-   */
-  onNativeTabSelect(tabId: string): NavigationState {
-    return this.stateManager.switchTab(tabId);
-  }
-
-  /**
-   * Resolves the external screen component from ScreenRegistry for a given routeId.
-   */
-  resolveRouteScreenComponent(routeId: string) {
-    const route = this.stateManager.registry.getById(routeId);
-    if (!route || !this.screenRegistry) {
-      return undefined;
-    }
-    return this.screenRegistry.resolve(route.screenRef);
-  }
+      null,
+      2
+    ),
+  };
 }

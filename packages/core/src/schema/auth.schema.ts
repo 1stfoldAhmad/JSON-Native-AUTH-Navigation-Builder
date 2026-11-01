@@ -9,6 +9,17 @@ export const AUTH_JSON_SCHEMA = {
     builderVersion: { type: 'string' },
     projectId: { type: 'string' },
     moduleId: { type: 'string' },
+    target: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        expoSdk: { type: 'number' },
+        platforms: {
+          type: 'array',
+          items: { type: 'string', enum: ['ios', 'android'] },
+        },
+      },
+    },
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
     id: { type: 'string', minLength: 1 },
@@ -50,6 +61,8 @@ export const AUTH_JSON_SCHEMA = {
           type: { type: 'string' },
           baseUrl: { type: 'string' },
           clientId: { type: 'string' },
+          issuer: { type: 'string' },
+          audience: { type: 'string' },
           discoveryUrl: { type: 'string' },
           redirectUri: { type: 'string' },
           scopes: { type: 'array', items: { type: 'string' } },

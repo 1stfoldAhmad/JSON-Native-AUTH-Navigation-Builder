@@ -1,5 +1,5 @@
 export {
   NAVIGATION_JSON_SCHEMA,
-  migrateNavigationDocument,
-  validateNavigationDocument,
+  validateNavigationSchema,
+  validateNavigationSemantics,
 } from '@expo-foundation/core';

@@ -10,6 +10,7 @@ export default defineConfig({
       '@expo-foundation/navigation': path.resolve(__dirname, 'packages/navigation/src/index.ts'),
       '@expo-foundation/integration': path.resolve(__dirname, 'packages/integration/src/index.ts'),
       '@expo-foundation/expo-generator': path.resolve(__dirname, 'packages/expo-generator/src/index.ts'),
+      '@expo-foundation/testing': path.resolve(__dirname, 'packages/testing/src/index.ts'),
     },
   },
   test: {
