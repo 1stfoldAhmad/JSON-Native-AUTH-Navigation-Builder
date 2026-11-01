@@ -4,15 +4,20 @@
     "ios": {
       "defaultMode": "strict-native",
       "engine": "expo-ui-swiftui",
+      "hostComponent": "Host",
+      "hostImportPath": "@expo/ui/swift-ui",
       "routerIntegration": {
         "factory": "createStandardRouterNavigator",
-        "bridge": "integrateWithRouter"
+        "stackRouter": "StackRouter",
+        "tabRouter": "TabRouter",
+        "libraryBridge": "integrateWithRouter"
       },
       "navigators": {
         "stack": {
           "capabilityId": "navigation.stack",
           "component": "NavigationStack",
           "importPath": "@expo/ui/swift-ui",
+          "routerType": "StackRouter",
           "adapterModule": "renderers/ios/NativeStack.ios.tsx",
           "supportsControlledPath": true,
           "supportsInteractiveSwipeBack": true
@@ -21,6 +26,7 @@
           "capabilityId": "navigation.tabs",
           "component": "TabView",
           "importPath": "@expo/ui/swift-ui",
+          "routerType": "TabRouter",
           "adapterModule": "renderers/ios/NativeTabs.ios.tsx",
           "preservesPerTabStackState": true
         },
@@ -28,18 +34,21 @@
           "capabilityId": "navigation.split",
           "component": "NavigationSplitView",
           "importPath": "@expo/ui/swift-ui",
+          "routerType": "StackRouter",
           "adapterModule": "renderers/ios/NativeSplitView.ios.tsx"
         },
         "drawer": {
           "capabilityId": "navigation.drawer",
           "component": "NavigationSplitView",
           "importPath": "@expo/ui/swift-ui",
+          "routerType": "StackRouter",
           "adapterModule": "renderers/ios/NativeSplitView.ios.tsx"
         },
         "modal": {
           "capabilityId": "navigation.modal",
           "component": "BottomSheet",
           "importPath": "@expo/ui/swift-ui",
+          "routerType": "StackRouter",
           "adapterModule": "renderers/ios/NativeStack.ios.tsx"
         }
       }
@@ -47,8 +56,12 @@
     "android": {
       "defaultMode": "automatic-fallback",
       "engine": "expo-ui-compose-router-hybrid",
+      "hostComponent": "Host",
+      "hostImportPath": "@expo/ui/jetpack-compose",
       "routerIntegration": {
         "factory": "createStandardRouterNavigator",
+        "stackRouter": "StackRouter",
+        "tabRouter": "TabRouter",
         "bridge": "expo-router"
       },
       "navigators": {
@@ -64,10 +77,11 @@
         "tabs": {
           "capabilityId": "navigation.tabs",
           "component": "NavigationBar",
+          "itemComponent": "NavigationBarItem",
           "importPath": "@expo/ui/jetpack-compose",
           "routerComponent": "TabRouter",
           "fallbackComponent": "NativeTabs",
-          "fallbackImportPath": "expo-router/unstable-native-tabs",
+          "fallbackImportPath": "expo-router/native-tabs",
           "adapterModule": "renderers/android/NativeTabs.android.tsx",
           "preservesPerTabStackState": true
         },

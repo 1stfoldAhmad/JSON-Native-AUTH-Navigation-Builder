@@ -1,64 +1,75 @@
-import { defaultCapabilityRegistry, type FoundationIR } from '@expo-foundation/core';
+/**
+ * @expo-foundation/expo-generator - Dependency Manager & SDK 58 Version Resolver
+ *
+ * Implements Section 9 Workstream B, Section 16.2, and Audit Findings 1 & 8:
+ * - Resolves exact Expo SDK 58 dependency versions from `compatibility/sdk-58/packages.json`
+ * - Distinguishes entry points across:
+ *   1. Navigation / Complete Foundation app (`"expo-router/entry"`)
+ *   2. Auth-only runnable Expo app (`"./src/AppEntry.tsx"`)
+ *   3. Auth-only reusable module (`"./src/foundation/auth/index.ts"`)
+ */
 
-export interface ResolvedDependencies {
-  sdkVersion: string;
+import { CapabilityRegistry, type ProjectIR } from '@expo-foundation/core';
+
+export type GenerationOutputTarget = 'expo-app' | 'reusable-module';
+
+export interface GeneratedPackageJson {
+  name: string;
+  version: string;
+  private: boolean;
+  main: string;
+  scripts: Record<string, string>;
   dependencies: Record<string, string>;
   devDependencies: Record<string, string>;
 }
 
-export class DependencyManager {
-  resolveForIR(ir: FoundationIR): ResolvedDependencies {
-    const profile = defaultCapabilityRegistry.getPackagesProfile();
-    const dependencies: Record<string, string> = {
-      ...profile.corePackages,
-    };
-
-    if (ir.navigation) {
-      Object.assign(dependencies, profile.navigationPackages);
-    }
-
-    if (ir.auth && ir.auth.enabled) {
-      Object.assign(dependencies, profile.authPackages);
-
-      const providerType = ir.auth.primaryProvider.type;
-      const optionalGroup = (
-        profile.optionalProviderPackages as Record<string, Record<string, string>>
-      )[providerType];
-      if (optionalGroup) {
-        Object.assign(dependencies, optionalGroup);
-      }
-
-      if (ir.auth.authMethods.oauth || ir.auth.authMethods.oidc) {
-        Object.assign(dependencies, profile.optionalProviderPackages.oidc);
-      }
-      if (ir.auth.authMethods.apple) {
-        Object.assign(dependencies, profile.optionalProviderPackages.apple);
-      }
-      if (ir.auth.authMethods.google) {
-        Object.assign(dependencies, profile.optionalProviderPackages.google);
-      }
-      if (ir.auth.authMethods.biometric) {
-        Object.assign(dependencies, profile.optionalProviderPackages.biometric);
-      }
-    }
-
-    // Sort keys deterministically
-    const sortedDeps: Record<string, string> = {};
-    for (const key of Object.keys(dependencies).sort()) {
-      sortedDeps[key] = dependencies[key];
-    }
-
-    const sortedDevDeps: Record<string, string> = {};
-    for (const key of Object.keys(profile.devPackages).sort()) {
-      sortedDevDeps[key] = (profile.devPackages as Record<string, string>)[key];
-    }
-
-    return {
-      sdkVersion: profile.sdkVersion,
-      dependencies: sortedDeps,
-      devDependencies: sortedDevDeps,
-    };
+export function generatePackageJson(
+  ir: ProjectIR,
+  options?: {
+    appName?: string;
+    version?: string;
+    outputTarget?: GenerationOutputTarget;
+    capabilityRegistry?: CapabilityRegistry;
   }
-}
+): GeneratedPackageJson {
+  const registry = options?.capabilityRegistry ?? new CapabilityRegistry();
+  const manifest = registry.getPackageManifest();
+  const outputTarget: GenerationOutputTarget = options?.outputTarget ?? 'expo-app';
 
-export const defaultDependencyManager = new DependencyManager();
+  const dependencies: Record<string, string> = {};
+  const sortedPkgNames = Object.keys(ir.requiredPackages).sort();
+  for (const pkg of sortedPkgNames) {
+    dependencies[pkg] = ir.requiredPackages[pkg];
+  }
+
+  let mainEntry: string;
+  if (ir.navigation) {
+    mainEntry = 'expo-router/entry';
+  } else if (outputTarget === 'reusable-module') {
+    mainEntry = './src/foundation/auth/index.ts';
+  } else {
+    mainEntry = './src/AppEntry.tsx';
+  }
+
+  return {
+    name:
+      options?.appName ??
+      ir.navigation?.id ??
+      ir.auth?.id ??
+      ir.metadata?.projectId ??
+      'expo-foundation-generated-app',
+    version: options?.version ?? '1.0.0',
+    private: true,
+    main: mainEntry,
+    scripts: {
+      start: 'expo start',
+      ios: 'expo run:ios',
+      android: 'expo run:android',
+      typecheck: 'tsc --noEmit',
+    },
+    dependencies,
+    devDependencies: {
+      ...manifest.devPackages,
+    },
+  };
+}

@@ -6,27 +6,27 @@
   "id": "application.integration",
   "authNavigation": {
     "enabled": true,
-    "guestEntry": "auth.login",
-    "authenticatedEntry": "app.home",
+    "guestEntry": "login",
+    "authenticatedEntry": "main-tabs",
     "afterLogin": "restore-intended-destination",
-    "afterRegistration": "auth.login",
-    "afterLogout": "auth.login",
-    "verificationRoute": "auth.verify",
-    "accessDeniedRoute": "auth.access-denied",
-    "sessionExpiredRoute": "auth.login",
-    "accountSuspendedRoute": "auth.access-denied",
+    "afterRegistration": "verify-email",
+    "afterLogout": "login",
+    "verificationRoute": "verify-email",
+    "accessDeniedRoute": "access-denied",
+    "sessionExpiredRoute": "login",
+    "accountSuspendedRoute": "access-denied",
     "roleRouteGroups": {
-      "admin": "admin.dashboard"
+      "admin": "admin-dashboard"
     },
     "events": {
-      "login.success": {
+      "auth.login.success": {
         "action": "restore-intended-destination",
         "flowRef": "flow.auth.after-login"
       },
-      "registration.completed": {
-        "action": "navigate",
-        "targetRoute": "auth.login",
-        "flowRef": "flow.registration.initialize"
+      "auth.logout.success": {
+        "action": "reset",
+        "targetRoute": "login",
+        "flowRef": "flow.auth.cleanup-user-cache"
       }
     }
   }

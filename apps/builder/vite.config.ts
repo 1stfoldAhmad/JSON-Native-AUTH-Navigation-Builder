@@ -30,6 +30,10 @@ export default defineConfig({
         __dirname,
         '../../packages/expo-generator/src/index.ts'
       ),
+      '@expo-foundation/testing': path.resolve(
+        __dirname,
+        '../../packages/testing/src/index.ts'
+      ),
     },
   },
   server: {

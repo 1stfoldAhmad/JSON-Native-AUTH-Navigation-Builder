@@ -9,6 +9,17 @@ export const NAVIGATION_JSON_SCHEMA = {
     builderVersion: { type: 'string' },
     projectId: { type: 'string' },
     moduleId: { type: 'string' },
+    target: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        expoSdk: { type: 'number' },
+        platforms: {
+          type: 'array',
+          items: { type: 'string', enum: ['ios', 'android'] },
+        },
+      },
+    },
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
     id: { type: 'string', minLength: 1 },
@@ -167,13 +178,32 @@ export const NAVIGATION_JSON_SCHEMA = {
               properties: {
                 type: {
                   type: 'string',
-                  enum: ['string', 'number', 'boolean', 'enum'],
+                  enum: [
+                    'string',
+                    'number',
+                    'boolean',
+                    'enum',
+                    'date',
+                    'uuid',
+                    'custom-scalar',
+                    'array',
+                  ],
                 },
                 required: { type: 'boolean' },
                 default: {
-                  oneOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }],
+                  oneOf: [
+                    { type: 'string' },
+                    { type: 'number' },
+                    { type: 'boolean' },
+                    { type: 'array', items: { type: 'string' } },
+                  ],
                 },
                 enumValues: { type: 'array', items: { type: 'string' } },
+                itemType: {
+                  type: 'string',
+                  enum: ['string', 'number', 'boolean'],
+                },
+                pattern: { type: 'string' },
                 source: { type: 'string', enum: ['path', 'query'] },
               },
             },
@@ -204,6 +234,26 @@ export const NAVIGATION_JSON_SCHEMA = {
                     items: { type: 'string' },
                   },
                   mode: { type: 'string', enum: ['any', 'all'] },
+                },
+              },
+              {
+                type: 'object',
+                required: ['accountStatus'],
+                additionalProperties: false,
+                properties: {
+                  accountStatus: {
+                    type: 'array',
+                    minItems: 1,
+                    items: { type: 'string' },
+                  },
+                },
+              },
+              {
+                type: 'object',
+                required: ['tenantId'],
+                additionalProperties: false,
+                properties: {
+                  tenantId: { type: 'string', minLength: 1 },
                 },
               },
             ],

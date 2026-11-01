@@ -1,238 +1,297 @@
-import { generateAuthFiles } from '@expo-foundation/auth';
+/**
+ * @expo-foundation/expo-generator - Project Generator
+ *
+ * Implements Section 13.3, Section 16, and Audit Findings 6, 7, 8, 15:
+ * - Deterministic compilation of ProjectIR into a complete, non-conflicting
+ *   Expo SDK 58 file map (supports Auth-only app, Auth-only reusable module,
+ *   Navigation-only app, and Complete Auth + Navigation + Integration app).
+ * - Preserves compiled root & nested navigator layouts in `app/_layout.tsx`
+ *   (never overwrites with bare `<Slot />`).
+ */
+
+import { generateAuthModuleFiles } from '@expo-foundation/auth';
+import type { ProjectIR } from '@expo-foundation/core';
+import { generateIntegrationModuleFiles } from '@expo-foundation/integration';
 import {
-  defaultFoundationCompiler,
-  type CompilerInput,
-  type Diagnostic,
-  type FoundationIR,
-} from '@expo-foundation/core';
-import { generateIntegrationFiles } from '@expo-foundation/integration';
-import { generateNavigationFiles } from '@expo-foundation/navigation';
-import { generateProjectConfigFiles } from '../config-generator/index.js';
-
-export interface GeneratedProjectFile {
-  path: string;
-  content: string;
-  ownership: 'generated' | 'user-protected';
-  checksum: string;
-}
-
-export interface GenerationManifest {
-  manifestVersion: '1.0.0';
-  projectId: string;
-  compilerVersion: string;
-  sdkVersion: number;
-  mode: 'auth-only' | 'navigation-only' | 'complete';
-  files: Record<
-    string,
-    {
-      ownership: 'generated' | 'user-protected';
-      checksum: string;
-    }
-  >;
-}
+  compileNavigatorLayoutFile,
+  generateNavigationModuleFiles,
+} from '@expo-foundation/navigation';
+import { generateAppJson, generateTsConfigJson } from '../config-generator/index.js';
+import {
+  generatePackageJson,
+  type GenerationOutputTarget,
+} from '../dependency-manager/index.js';
+import {
+  validateGeneratedOutput,
+  type OutputValidationResult,
+} from '../output-validator/index.js';
 
 export interface GeneratedProjectBundle {
-  ir: FoundationIR;
-  files: Record<string, GeneratedProjectFile>;
-  manifest: GenerationManifest;
-  diagnostics: Diagnostic[];
-  preservedUserFiles: string[];
-  modifiedGeneratedFiles: string[];
+  files: Record<string, string>;
+  fileList: string[];
+  validation: OutputValidationResult;
 }
 
-/**
- * Computes a deterministic FNV-1a 64-bit hex checksum suitable for both Node and browser runtimes.
- */
-export function computeDeterministicChecksum(content: string): string {
-  let h1 = 0xdeadbeef ^ content.length;
-  let h2 = 0x41c6ce57 ^ content.length;
-  for (let i = 0; i < content.length; i++) {
-    const ch = content.charCodeAt(i);
-    h1 = Math.imul(h1 ^ ch, 2654435761);
-    h2 = Math.imul(h2 ^ ch, 1597334677);
-  }
-  h1 =
-    Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^
-    Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 =
-    Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^
-    Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  return (
-    (h2 >>> 0).toString(16).padStart(8, '0') +
-    (h1 >>> 0).toString(16).padStart(8, '0')
-  );
-}
-
-export interface GenerateProjectOptions {
-  existingFiles?: Record<string, string>;
-  previousManifest?: GenerationManifest;
-  allowOverwriteModifiedGenerated?: boolean;
+export interface ProjectGeneratorOptions {
+  appName?: string;
+  slug?: string;
+  bundleIdentifier?: string;
+  androidPackage?: string;
+  outputTarget?: GenerationOutputTarget;
 }
 
 export class ExpoProjectGenerator {
-  generateFromIR(
-    ir: FoundationIR,
-    options?: GenerateProjectOptions,
-    priorDiagnostics: Diagnostic[] = []
+  generate(
+    ir: ProjectIR,
+    options?: ProjectGeneratorOptions
   ): GeneratedProjectBundle {
-    const rawFiles: Array<{
-      path: string;
-      content: string;
-      ownership: 'generated' | 'user-protected';
-    }> = [];
-
-    rawFiles.push(...generateProjectConfigFiles(ir));
-
-    if (ir.auth && ir.auth.enabled) {
-      rawFiles.push(...generateAuthFiles(ir.auth));
-    }
-
-    if (ir.navigation) {
-      rawFiles.push(...generateNavigationFiles(ir.navigation));
-    }
-
-    if (ir.integration && ir.integration.enabled) {
-      rawFiles.push(...generateIntegrationFiles(ir.integration));
-    }
-
-    const filesMap: Record<string, GeneratedProjectFile> = {};
-    const manifestEntries: GenerationManifest['files'] = {};
-    const preservedUserFiles: string[] = [];
-    const modifiedGeneratedFiles: string[] = [];
-    const diagnostics: Diagnostic[] = [...priorDiagnostics];
-
-    const existing = options?.existingFiles ?? {};
-    const prevManifest = options?.previousManifest;
-
-    // Sort paths deterministically
-    rawFiles.sort((a, b) => a.path.localeCompare(b.path));
-
-    for (const item of rawFiles) {
-      const existingContent = existing[item.path];
-
-      // Rule 2: User-written files must not be overwritten
-      if (item.ownership === 'user-protected' && existingContent !== undefined) {
-        const checksum = computeDeterministicChecksum(existingContent);
-        filesMap[item.path] = {
-          path: item.path,
-          content: existingContent,
-          ownership: 'user-protected',
-          checksum,
-        };
-        manifestEntries[item.path] = {
-          ownership: 'user-protected',
-          checksum,
-        };
-        preservedUserFiles.push(item.path);
-        continue;
-      }
-
-      // Rule 6: Detect manual modifications to previously generated files
-      if (
-        item.ownership === 'generated' &&
-        existingContent !== undefined &&
-        prevManifest?.files[item.path]
-      ) {
-        const actualExistingChecksum = computeDeterministicChecksum(existingContent);
-        const expectedPreviousChecksum = prevManifest.files[item.path].checksum;
-        if (actualExistingChecksum !== expectedPreviousChecksum) {
-          modifiedGeneratedFiles.push(item.path);
-          diagnostics.push({
-            code: 'GEN_MANUAL_MODIFICATION_DETECTED',
-            severity: 'warning',
-            document: 'system',
-            jsonPath: item.path,
-            message: `WARNING: Manual modification detected in builder-generated file "${item.path}".`,
-            suggestion:
-              'Move custom logic to src/screens/registry.ts or external modules so regeneration remains deterministic.',
-            canGenerate: true,
-          });
-          if (options?.allowOverwriteModifiedGenerated === false) {
-            filesMap[item.path] = {
-              path: item.path,
-              content: existingContent,
-              ownership: 'generated',
-              checksum: actualExistingChecksum,
-            };
-            manifestEntries[item.path] = {
-              ownership: 'generated',
-              checksum: actualExistingChecksum,
-            };
-            continue;
-          }
-        }
-      }
-
-      const checksum = computeDeterministicChecksum(item.content);
-      filesMap[item.path] = {
-        path: item.path,
-        content: item.content,
-        ownership: item.ownership,
-        checksum,
-      };
-      manifestEntries[item.path] = {
-        ownership: item.ownership,
-        checksum,
-      };
-    }
-
-    // Also preserve any extra user files in existingFiles that are not part of the generator
-    for (const [existingPath, existingContent] of Object.entries(existing)) {
-      if (!filesMap[existingPath] && existingPath !== '.foundation-manifest.json') {
-        const checksum = computeDeterministicChecksum(existingContent);
-        filesMap[existingPath] = {
-          path: existingPath,
-          content: existingContent,
-          ownership: 'user-protected',
-          checksum,
-        };
-        preservedUserFiles.push(existingPath);
-      }
-    }
-
-    const manifest: GenerationManifest = {
-      manifestVersion: '1.0.0',
-      projectId: ir.projectMetadata.projectId,
-      compilerVersion: ir.projectMetadata.builderVersion,
-      sdkVersion: ir.projectMetadata.sdkVersion,
-      mode: ir.projectMetadata.mode,
-      files: manifestEntries,
-    };
-
-    const manifestContent = `${JSON.stringify(manifest, null, 2)}\n`;
-    filesMap['.foundation-manifest.json'] = {
-      path: '.foundation-manifest.json',
-      content: manifestContent,
-      ownership: 'generated',
-      checksum: computeDeterministicChecksum(manifestContent),
-    };
-
-    return {
-      ir,
-      files: filesMap,
-      manifest,
-      diagnostics,
-      preservedUserFiles,
-      modifiedGeneratedFiles,
-    };
-  }
-
-  compileAndGenerate(
-    input: CompilerInput,
-    options?: GenerateProjectOptions
-  ): GeneratedProjectBundle {
-    const compilation = defaultFoundationCompiler.compile(input);
-    if (!compilation.ir || !compilation.canGenerate) {
-      const errorMessages = compilation.diagnostics
-        .filter((d) => !d.canGenerate)
+    if (!ir.canGenerate) {
+      const blocking = ir.diagnostics
+        .filter((d) => d.severity === 'error' || !d.canGenerate)
         .map((d) => `[${d.code}] ${d.message}`)
         .join('; ');
       throw new Error(
-        `Cannot generate Expo project due to blocking compilation errors: ${errorMessages}`
+        `Cannot generate project due to blocking compiler diagnostics: ${blocking}`
       );
     }
-    return this.generateFromIR(compilation.ir, options, compilation.diagnostics);
+
+    const outputTarget: GenerationOutputTarget =
+      options?.outputTarget ?? 'expo-app';
+    const rawFiles: Record<string, string> = {};
+
+    // 1. Root Configuration Files
+    const pkgJson = generatePackageJson(ir, {
+      appName: options?.appName,
+      outputTarget,
+    });
+    rawFiles['package.json'] = JSON.stringify(pkgJson, null, 2) + '\n';
+
+    const appJson = generateAppJson(ir, options);
+    rawFiles['app.json'] = JSON.stringify(appJson, null, 2) + '\n';
+
+    const tsConfig = generateTsConfigJson();
+    rawFiles['tsconfig.json'] = JSON.stringify(tsConfig, null, 2) + '\n';
+
+    // 2. Auth Module Files
+    if (ir.auth) {
+      Object.assign(rawFiles, generateAuthModuleFiles(ir.auth));
+    }
+
+    // 3. Navigation Module Files
+    if (ir.navigation) {
+      Object.assign(rawFiles, generateNavigationModuleFiles(ir.navigation));
+    }
+
+    // 4. Integration Module Files
+    if (ir.integration && ir.auth && ir.navigation) {
+      Object.assign(rawFiles, generateIntegrationModuleFiles(ir.integration));
+
+      // Audit Finding 7: Compile the root navigator layout (`IOSNativeStack` / `AndroidNativeStack` / etc.)
+      // AND wrap it in <AuthProvider> + <AuthNavigationGate> (never replace with a bare <Slot />).
+      const rootNav =
+        ir.navigation.navigators[ir.navigation.rootNavigator] ??
+        Object.values(ir.navigation.navigators)[0];
+      if (rootNav) {
+        const baseLayout = compileNavigatorLayoutFile(
+          rootNav,
+          ir.navigation,
+          '..',
+          false
+        );
+        rawFiles['app/_layout.tsx'] = wrapRootLayoutWithAuthAndIntegration(
+          baseLayout,
+          true
+        );
+      }
+    } else if (ir.auth && ir.navigation) {
+      const rootNav =
+        ir.navigation.navigators[ir.navigation.rootNavigator] ??
+        Object.values(ir.navigation.navigators)[0];
+      if (rootNav) {
+        const baseLayout = compileNavigatorLayoutFile(
+          rootNav,
+          ir.navigation,
+          '..',
+          false
+        );
+        rawFiles['app/_layout.tsx'] = wrapRootLayoutWithAuthAndIntegration(
+          baseLayout,
+          false
+        );
+      }
+    } else if (ir.auth && !ir.navigation && outputTarget === 'expo-app') {
+      // Audit Finding 8: Runnable Auth-only Expo application entry point
+      const loginScreenRef = ir.auth.screenRefs.login ?? 'screen.auth.login';
+      rawFiles['src/AppEntry.tsx'] = `/**
+ * GENERATED BY @expo-foundation/expo-generator - DO NOT EDIT MANUALLY
+ * Standalone Auth-Only Runnable Expo Application Entry Point
+ */
+import React from 'react';
+import { registerRootComponent } from 'expo';
+import { AuthProvider, useAuth } from './foundation/auth/AuthProvider';
+import { resolveGeneratedScreen } from './screens/registry';
+
+function AuthStandaloneNavigator() {
+  const auth = useAuth();
+  const LoginScreen = resolveGeneratedScreen('${loginScreenRef}');
+  return <LoginScreen routeId="auth-standalone" params={{ status: auth.status }} />;
+}
+
+export function AuthStandaloneApp() {
+  return (
+    <AuthProvider>
+      <AuthStandaloneNavigator />
+    </AuthProvider>
+  );
+}
+
+registerRootComponent(AuthStandaloneApp);
+export default AuthStandaloneApp;
+`;
+    }
+
+    // 5. Screen Registry & Placeholder Screen Components for all referenced screenRefs
+    const allScreenRefs = new Set<string>();
+    if (ir.auth) {
+      for (const ref of Object.values(ir.auth.screenRefs)) {
+        if (ref) allScreenRefs.add(ref);
+      }
+    }
+    if (ir.navigation) {
+      for (const route of Object.values(ir.navigation.routes)) {
+        allScreenRefs.add(route.screenRef);
+      }
+    }
+
+    rawFiles['src/screens/registry.tsx'] = generateScreenRegistryFile(
+      Array.from(allScreenRefs).sort()
+    );
+
+    // Deterministically sort all file keys
+    const sortedKeys = Object.keys(rawFiles).sort();
+    const files: Record<string, string> = {};
+    for (const k of sortedKeys) {
+      files[k] = rawFiles[k];
+    }
+
+    const validation = validateGeneratedOutput(files, ir);
+
+    return {
+      files,
+      fileList: sortedKeys,
+      validation,
+    };
   }
 }
 
-export const defaultExpoProjectGenerator = new ExpoProjectGenerator();
+function wrapRootLayoutWithAuthAndIntegration(
+  compiledNavigatorSource: string,
+  includeIntegrationGate: boolean
+): string {
+  const providerImports = includeIntegrationGate
+    ? `import { AuthProvider } from '../src/foundation/auth/AuthProvider';\nimport { NavigationProvider } from '../src/foundation/navigation/NavigationProvider';\nimport { AuthNavigationGate } from '../src/foundation/integration/AuthNavigationGate';\n`
+    : `import { AuthProvider } from '../src/foundation/auth/AuthProvider';\nimport { NavigationProvider } from '../src/foundation/navigation/NavigationProvider';\n`;
+
+  const updated = compiledNavigatorSource.replace(
+    /export default function ([A-Za-z0-9_]+)\(\) \{\s*return <([A-Za-z0-9_]+) \/>;\s*\}/m,
+    (_match, fnName: string, innerName: string) => {
+      if (includeIntegrationGate) {
+        return `export default function ${fnName}() {
+  return (
+    <AuthProvider>
+      <NavigationProvider>
+        <AuthNavigationGate>
+          <${innerName} />
+        </AuthNavigationGate>
+      </NavigationProvider>
+    </AuthProvider>
+  );
+}`;
+      }
+      return `export default function ${fnName}() {
+  return (
+    <AuthProvider>
+      <NavigationProvider>
+        <${innerName} />
+      </NavigationProvider>
+    </AuthProvider>
+  );
+}`;
+    }
+  );
+
+  return `${providerImports}${updated}`;
+}
+
+function generateScreenRegistryFile(screenRefs: string[]): string {
+  const entries = screenRefs
+    .map(
+      (ref) =>
+        `  '${ref}': ({ routeId, params }: GeneratedScreenProps) => (\n    <View style={styles.container}>\n      <Text style={styles.title}>${ref}</Text>\n      <Text style={styles.subtitle}>Route: {routeId}</Text>\n      <Text style={styles.params}>{JSON.stringify(params ?? {})}</Text>\n    </View>\n  ),`
+    )
+    .join('\n');
+
+  return `/**
+ * GENERATED BY @expo-foundation/expo-generator
+ * Screen Reference Registry mapping logical screenRef IDs to React Native components.
+ */
+import React from 'react';
+import { View, Text, StyleSheet } from 'react-native';
+
+export interface GeneratedScreenProps {
+  routeId: string;
+  params?: Record<string, unknown>;
+}
+
+const DEFAULT_SCREENS: Record<string, React.ComponentType<GeneratedScreenProps>> = {
+${entries}
+};
+
+const customOverrides = new Map<string, React.ComponentType<GeneratedScreenProps>>();
+
+export function registerCustomScreen(
+  screenRef: string,
+  component: React.ComponentType<GeneratedScreenProps>
+): void {
+  customOverrides.set(screenRef, component);
+}
+
+export function resolveGeneratedScreen(
+  screenRef: string
+): React.ComponentType<GeneratedScreenProps> {
+  return (
+    customOverrides.get(screenRef) ??
+    DEFAULT_SCREENS[screenRef] ??
+    (({ routeId }: GeneratedScreenProps) => (
+      <View style={styles.container}>
+        <Text style={styles.title}>Unregistered Screen: {screenRef}</Text>
+        <Text style={styles.subtitle}>Route: {routeId}</Text>
+      </View>
+    ))
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  title: {
+    fontSize: 18,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  subtitle: {
+    fontSize: 14,
+    opacity: 0.7,
+    marginBottom: 8,
+  },
+  params: {
+    fontSize: 12,
+    fontFamily: 'monospace',
+  },
+});
+`;
+}

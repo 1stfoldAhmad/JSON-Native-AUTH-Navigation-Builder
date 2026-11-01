@@ -1,88 +1,133 @@
 {
   "schemaVersion": "1.0.0",
-  "id": "poc.navigation",
+  "id": "phase0-native-navigation-poc",
   "platforms": {
     "ios": {
       "renderer": "expo-ui",
-      "strictNative": true
+      "strictNative": true,
+      "mode": "strict-native"
     },
     "android": {
       "renderer": "auto",
-      "fallback": "expo-router"
+      "fallback": "expo-router",
+      "mode": "automatic-fallback"
     }
   },
-  "rootNavigator": "root.stack",
+  "rootNavigator": "root-stack",
   "navigators": [
     {
-      "id": "root.stack",
+      "id": "root-stack",
       "type": "stack",
-      "initialRoute": "app.tabs",
-      "children": ["app.tabs"]
+      "initialRoute": "guest-stack",
+      "children": ["guest-stack", "main-tabs"]
     },
     {
-      "id": "app.tabs",
+      "id": "guest-stack",
+      "type": "stack",
+      "initialRoute": "login",
+      "children": ["login", "register", "verify"]
+    },
+    {
+      "id": "main-tabs",
       "type": "tabs",
-      "tabsOptions": {
-        "initialTab": "tab.home.stack",
-        "preserveTabState": true,
-        "tabs": [
-          { "routeId": "tab.home.stack", "label": "Home", "icon": "house.fill" },
-          { "routeId": "tab.search.stack", "label": "Search", "icon": "magnifyingglass" }
-        ]
-      },
-      "children": ["tab.home.stack", "tab.search.stack"]
+      "initialRoute": "home-stack",
+      "children": ["home-stack", "search-stack", "profile-stack"]
     },
     {
-      "id": "tab.home.stack",
+      "id": "home-stack",
       "type": "stack",
-      "initialRoute": "app.home",
-      "children": ["app.home", "app.orders.detail"]
+      "initialRoute": "home",
+      "children": ["home", "order-detail"]
     },
     {
-      "id": "tab.search.stack",
+      "id": "search-stack",
       "type": "stack",
-      "initialRoute": "app.search",
-      "children": ["app.search", "app.products.detail"]
+      "initialRoute": "search",
+      "children": ["search", "product-detail"]
+    },
+    {
+      "id": "profile-stack",
+      "type": "stack",
+      "initialRoute": "profile",
+      "children": ["profile", "settings"]
     }
   ],
   "routes": [
     {
-      "id": "app.home",
-      "path": "/",
-      "screenRef": "screen.app.home",
-      "navigatorId": "tab.home.stack",
+      "id": "login",
+      "path": "/login",
+      "screenRef": "screen.auth.login",
+      "navigatorId": "guest-stack",
+      "access": "guest"
+    },
+    {
+      "id": "register",
+      "path": "/register",
+      "screenRef": "screen.auth.register",
+      "navigatorId": "guest-stack",
+      "access": "guest"
+    },
+    {
+      "id": "verify",
+      "path": "/verify",
+      "screenRef": "screen.auth.verify",
+      "navigatorId": "guest-stack",
       "access": "public"
     },
     {
-      "id": "app.orders.detail",
+      "id": "home",
+      "path": "/home",
+      "screenRef": "screen.app.home",
+      "navigatorId": "home-stack",
+      "access": "authenticated"
+    },
+    {
+      "id": "order-detail",
       "path": "/orders/:orderId",
       "screenRef": "screen.app.order-detail",
-      "navigatorId": "tab.home.stack",
-      "access": "public",
+      "navigatorId": "home-stack",
+      "access": "authenticated",
       "params": {
-        "orderId": { "type": "string", "required": true, "source": "path" }
+        "orderId": { "type": "string", "required": true },
+        "tab": { "type": "string", "required": false, "default": "summary" }
       }
     },
     {
-      "id": "app.search",
+      "id": "search",
       "path": "/search",
       "screenRef": "screen.app.search",
-      "navigatorId": "tab.search.stack",
-      "access": "public"
+      "navigatorId": "search-stack",
+      "access": "authenticated"
     },
     {
-      "id": "app.products.detail",
+      "id": "product-detail",
       "path": "/products/:productId",
       "screenRef": "screen.app.product-detail",
-      "navigatorId": "tab.search.stack",
-      "access": "public",
+      "navigatorId": "search-stack",
+      "access": "authenticated",
       "params": {
-        "productId": { "type": "string", "required": true, "source": "path" }
+        "productId": { "type": "string", "required": true }
       }
+    },
+    {
+      "id": "profile",
+      "path": "/profile",
+      "screenRef": "screen.app.profile",
+      "navigatorId": "profile-stack",
+      "access": "authenticated"
+    },
+    {
+      "id": "settings",
+      "path": "/settings",
+      "screenRef": "screen.app.settings",
+      "navigatorId": "profile-stack",
+      "access": "authenticated"
     }
   ],
   "linking": {
-    "scheme": "expofoundation",
-    "hosts": ["example.com"]
+    "scheme": "pocapp",
+    "hosts": ["poc.expo-foundation.dev"],
+    "universalLinks": true,
+    "androidAppLinks": true
   }
 }

@@ -1,262 +1,459 @@
 import React, { useMemo, useState } from 'react';
-import type {
-  AuthConfigDocument,
-  CompilationResult,
-  NavigationConfigDocument,
+import {
+  type AuthConfigDocument,
+  type Diagnostic,
+  type DiagnosticCategory,
+  type IntegrationConfigDocument,
+  type NavigationConfigDocument,
+  type ProjectIR,
 } from '@expo-foundation/core';
 import {
-  defaultExpoProjectGenerator,
-  defaultOutputValidator,
+  ExpoProjectGenerator,
+  type GenerationOutputTarget,
 } from '@expo-foundation/expo-generator';
 
-export interface DiagnosticsAndGeneratorWorkspaceProps {
-  compilation: CompilationResult;
-  authConfig: AuthConfigDocument | null;
-  navigationConfig: NavigationConfigDocument | null;
-  onInjectSampleError: () => void;
-  onResetCleanPreset: () => void;
+interface Props {
+  projectIR: ProjectIR;
+  authConfig?: AuthConfigDocument;
+  navigationConfig?: NavigationConfigDocument;
+  integrationConfig?: IntegrationConfigDocument;
+  onUpdateAuth: (doc: AuthConfigDocument) => void;
+  onUpdateNavigation: (doc: NavigationConfigDocument) => void;
+  onUpdateIntegration: (doc: IntegrationConfigDocument) => void;
 }
 
+const generator = new ExpoProjectGenerator();
+
 export function DiagnosticsAndGeneratorWorkspace({
-  compilation,
-  onInjectSampleError,
-  onResetCleanPreset,
-}: DiagnosticsAndGeneratorWorkspaceProps) {
-  const [activeTab, setActiveTab] = useState<'diagnostics' | 'ir' | 'generator'>('diagnostics');
-  const [selectedFilePath, setSelectedFilePath] = useState<string>('package.json');
+  projectIR,
+  authConfig,
+  navigationConfig,
+  integrationConfig,
+  onUpdateAuth,
+  onUpdateNavigation,
+  onUpdateIntegration,
+}: Props) {
+  const [selectedFile, setSelectedFile] = useState<string>('app/_layout.tsx');
+  const [jsonTab, setJsonTab] = useState<'auth' | 'navigation' | 'integration'>(
+    navigationConfig ? 'navigation' : 'auth'
+  );
+  const [jsonDraft, setJsonDraft] = useState<string>('');
+  const [jsonParseError, setJsonParseError] = useState<string | null>(null);
+  const [categoryFilter, setCategoryFilter] = useState<DiagnosticCategory | 'all'>('all');
+  const [highlightedJsonPath, setHighlightedJsonPath] = useState<string | null>(null);
+  const [outputTarget, setOutputTarget] = useState<GenerationOutputTarget>('expo-app');
 
   const generatedBundle = useMemo(() => {
-    if (!compilation.ir || !compilation.canGenerate) {
-      return null;
-    }
+    if (!projectIR.canGenerate) return null;
     try {
-      const bundle = defaultExpoProjectGenerator.generateFromIR(
-        compilation.ir,
-        undefined,
-        compilation.diagnostics
-      );
-      const report = defaultOutputValidator.validate(bundle);
-      return { bundle, report };
+      return generator.generate(projectIR, {
+        appName: 'expo-foundation-studio-app',
+        outputTarget,
+      });
     } catch {
       return null;
     }
-  }, [compilation]);
+  }, [projectIR, outputTarget]);
 
-  const fileList = useMemo(
-    () => (generatedBundle ? Object.keys(generatedBundle.bundle.files) : []),
-    [generatedBundle]
-  );
+  const activeFilePath = useMemo(() => {
+    if (!generatedBundle) return '';
+    if (generatedBundle.files[selectedFile]) return selectedFile;
+    return generatedBundle.fileList[0] ?? '';
+  }, [generatedBundle, selectedFile]);
 
-  const activeFile =
-    generatedBundle?.bundle.files[selectedFilePath] ??
-    (fileList[0] ? generatedBundle?.bundle.files[fileList[0]] : undefined);
+  const currentJsonSource = useMemo(() => {
+    if (jsonTab === 'auth' && authConfig) {
+      return JSON.stringify(authConfig, null, 2);
+    }
+    if (jsonTab === 'navigation' && navigationConfig) {
+      return JSON.stringify(navigationConfig, null, 2);
+    }
+    if (jsonTab === 'integration' && integrationConfig) {
+      return JSON.stringify(integrationConfig, null, 2);
+    }
+    return '// Document not enabled in current preset';
+  }, [jsonTab, authConfig, navigationConfig, integrationConfig]);
+
+  const filteredDiagnostics = useMemo(() => {
+    if (categoryFilter === 'all') return projectIR.diagnostics;
+    return projectIR.diagnostics.filter((d) => d.category === categoryFilter);
+  }, [projectIR.diagnostics, categoryFilter]);
+
+  const handleDiagnosticClick = (diag: Diagnostic) => {
+    setHighlightedJsonPath(diag.jsonPath);
+    if (
+      diag.document === 'auth' ||
+      diag.document === 'navigation' ||
+      diag.document === 'integration'
+    ) {
+      setJsonTab(diag.document);
+      setJsonDraft('');
+      setJsonParseError(null);
+    }
+  };
+
+  const applyJsonDraft = () => {
+    if (!jsonDraft.trim()) return;
+    try {
+      const parsed = JSON.parse(jsonDraft);
+      setJsonParseError(null);
+      if (jsonTab === 'auth') onUpdateAuth(parsed as AuthConfigDocument);
+      if (jsonTab === 'navigation')
+        onUpdateNavigation(parsed as NavigationConfigDocument);
+      if (jsonTab === 'integration')
+        onUpdateIntegration(parsed as IntegrationConfigDocument);
+      setJsonDraft('');
+    } catch (err) {
+      setJsonParseError(err instanceof Error ? err.message : 'Invalid JSON');
+    }
+  };
+
+  const insertSchemaSnippet = (snippetType: 'screenRef' | 'flowRef' | 'rolePolicy') => {
+    const base = jsonDraft || currentJsonSource;
+    const snippets: Record<typeof snippetType, string> = {
+      screenRef: '"screen.app.custom-view"',
+      flowRef: '"flow.auth.custom-hook"',
+      rolePolicy: '{ "roles": ["admin"], "mode": "any" }',
+    };
+    setJsonDraft(`${base}\n// Snippet (${snippetType}): ${snippets[snippetType]}`);
+  };
+
+  const downloadGeneratedBundle = () => {
+    if (!generatedBundle) return;
+    const payload = JSON.stringify(
+      {
+        exportedAt: new Date().toISOString(),
+        sdkVersion: projectIR.sdkVersion,
+        outputTarget,
+        files: generatedBundle.files,
+      },
+      null,
+      2
+    );
+    const blob = new Blob([payload], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${projectIR.metadata.projectId}-expo-sdk58-bundle.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
-    <div className="workspace-layout">
-      <aside className="subnav">
-        <div className="subnav-title">Compiler & Diagnostics</div>
-        <button
-          className={`subnav-btn ${activeTab === 'diagnostics' ? 'active' : ''}`}
-          onClick={() => setActiveTab('diagnostics')}
-        >
-          Diagnostics ({compilation.diagnostics.length})
-        </button>
-        <button
-          className={`subnav-btn ${activeTab === 'ir' ? 'active' : ''}`}
-          onClick={() => setActiveTab('ir')}
-        >
-          Canonical FoundationIR
-        </button>
-        <button
-          className={`subnav-btn ${activeTab === 'generator' ? 'active' : ''}`}
-          onClick={() => setActiveTab('generator')}
-        >
-          Generated Expo Project ({fileList.length} files)
-        </button>
-
-        <div className="scope-guard-card">
-          <div className="badge badge-info">Diagnostic Controls</div>
-          <p>Test the compiler's semantic & security diagnostics engine:</p>
-          <button
-            className="btn btn-sm"
-            style={{ width: '100%', marginBottom: '6px' }}
-            onClick={onInjectSampleError}
-          >
-            Inject Sample Config Errors
-          </button>
-          <button
-            className="btn btn-sm"
-            style={{ width: '100%' }}
-            onClick={onResetCleanPreset}
-          >
-            Restore Valid Preset
-          </button>
-        </div>
-      </aside>
-
-      <main className="workspace-content">
-        {activeTab === 'diagnostics' && (
-          <div className="panel">
-            <div className="panel-header-row">
-              <div>
-                <h2>Diagnostics & Validation Center</h2>
-                <p className="subtitle">
-                  Structured schema, reference, semantic, capability, and security diagnostics
-                  (Section 16).
-                </p>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div className="grid-2">
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <div className="panel-title">Compiler Diagnostics Engine</div>
+              <div className="panel-subtitle">
+                Click any diagnostic to jump to its JSON document and highlight its path
               </div>
-              <div
-                className={`badge ${
-                  compilation.canGenerate ? 'badge-native' : 'badge-unsupported'
-                }`}
+            </div>
+            <span
+              className={`badge ${
+                projectIR.canGenerate ? 'badge-success' : 'badge-error'
+              }`}
+            >
+              {projectIR.canGenerate ? 'CAN GENERATE: YES' : 'BLOCKED BY ERRORS'}
+            </span>
+          </div>
+
+          <div
+            style={{
+              display: 'flex',
+              gap: 6,
+              flexWrap: 'wrap',
+              marginBottom: 12,
+            }}
+          >
+            {(
+              [
+                'all',
+                'schema',
+                'auth',
+                'session-security',
+                'navigation-graph',
+                'capability',
+                'integration',
+                'generator',
+                'build',
+              ] as const
+            ).map((cat) => (
+              <button
+                key={cat}
+                className="btn"
+                style={{
+                  padding: '3px 8px',
+                  fontSize: 11,
+                  background:
+                    categoryFilter === cat ? 'var(--accent)' : undefined,
+                  borderColor:
+                    categoryFilter === cat ? 'var(--accent)' : undefined,
+                }}
+                onClick={() => setCategoryFilter(cat)}
               >
-                {compilation.canGenerate
-                  ? 'Generation Gate: READY'
-                  : 'Generation Gate: BLOCKED BY ERRORS'}
-              </div>
-            </div>
+                {cat}
+              </button>
+            ))}
+          </div>
 
-            <h3>9-Stage Compiler Pipeline Status</h3>
-            <div className="pipeline-steps">
-              {compilation.stages.map((st) => (
-                <div key={st.stage} className={`pipeline-step status-${st.status}`}>
-                  <strong>
-                    Stage {st.stage}: {st.name}
-                  </strong>
-                  <div>{st.summary}</div>
+          {filteredDiagnostics.length === 0 ? (
+            <div style={{ fontSize: 13, color: 'var(--success)' }}>
+              Zero diagnostics in selected category. All contracts and capabilities
+              are valid.
+            </div>
+          ) : (
+            filteredDiagnostics.map((d, idx) => (
+              <div
+                key={`${d.code}_${idx}`}
+                className={`diagnostic-card ${d.severity}`}
+                style={{ cursor: 'pointer' }}
+                onClick={() => handleDiagnosticClick(d)}
+              >
+                <div className="diagnostic-header">
+                  <span className="diagnostic-code">
+                    [{d.severity.toUpperCase()}] {d.code}
+                  </span>
+                  <span className="diagnostic-path">
+                    {d.document}:{d.jsonPath}
+                  </span>
                 </div>
-              ))}
+                <div className="diagnostic-msg">{d.message}</div>
+                <div className="diagnostic-suggestion">Fix: {d.suggestion}</div>
+              </div>
+            ))
+          )}
+        </div>
+
+        <div className="panel">
+          <div className="panel-header">
+            <div>
+              <div className="panel-title">Schema-Aware JSON Source Editor</div>
+              <div className="panel-subtitle">
+                Bidirectional synchronization between visual editors and JSON contracts
+              </div>
             </div>
-
-            <h3>Diagnostic Report ({compilation.diagnostics.length})</h3>
-            {compilation.diagnostics.length === 0 ? (
-              <div className="alert alert-success">
-                Zero errors or warnings. Configuration is valid and ready for deterministic Expo
-                SDK 58 code generation.
-              </div>
-            ) : (
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Severity</th>
-                    <th>Code</th>
-                    <th>Document</th>
-                    <th>JSON Path</th>
-                    <th>Explanation & Suggested Correction</th>
-                    <th>Can Generate?</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {compilation.diagnostics.map((diag, idx) => (
-                    <tr key={`${diag.code}_${idx}`}>
-                      <td>
-                        <span className={`badge badge-${diag.severity}`}>
-                          {diag.severity.toUpperCase()}
-                        </span>
-                      </td>
-                      <td>
-                        <code>{diag.code}</code>
-                      </td>
-                      <td>{diag.document}</td>
-                      <td>
-                        <code>{diag.jsonPath}</code>
-                      </td>
-                      <td>
-                        <div>{diag.message}</div>
-                        <small className="suggestion-text">Fix: {diag.suggestion}</small>
-                      </td>
-                      <td>{diag.canGenerate ? 'Yes' : 'No (Blocking)'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            <div style={{ display: 'flex', gap: 6 }}>
+              {authConfig && (
+                <button
+                  className={`btn ${jsonTab === 'auth' ? 'btn-primary' : ''}`}
+                  onClick={() => {
+                    setJsonTab('auth');
+                    setJsonDraft('');
+                    setJsonParseError(null);
+                  }}
+                >
+                  auth.json
+                </button>
+              )}
+              {navigationConfig && (
+                <button
+                  className={`btn ${
+                    jsonTab === 'navigation' ? 'btn-primary' : ''
+                  }`}
+                  onClick={() => {
+                    setJsonTab('navigation');
+                    setJsonDraft('');
+                    setJsonParseError(null);
+                  }}
+                >
+                  navigation.json
+                </button>
+              )}
+              {integrationConfig && (
+                <button
+                  className={`btn ${
+                    jsonTab === 'integration' ? 'btn-primary' : ''
+                  }`}
+                  onClick={() => {
+                    setJsonTab('integration');
+                    setJsonDraft('');
+                    setJsonParseError(null);
+                  }}
+                >
+                  integration.json
+                </button>
+              )}
+            </div>
           </div>
-        )}
 
-        {activeTab === 'ir' && (
-          <div className="panel">
-            <h2>Canonical Intermediate Representation (FoundationIR)</h2>
-            <p className="subtitle">
-              Platform-neutral normalized IR decoupling JSON schemas from Expo SDK 58 code
-              generation.
-            </p>
-            <pre className="code-block">
-              {compilation.ir
-                ? JSON.stringify(compilation.ir, null, 2)
-                : 'Fix blocking schema/compiler errors to inspect FoundationIR.'}
-            </pre>
+          {highlightedJsonPath && (
+            <div
+              style={{
+                marginBottom: 8,
+                padding: '6px 10px',
+                borderRadius: 6,
+                background: 'rgba(59, 130, 246, 0.15)',
+                fontSize: 12,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+              }}
+            >
+              <span>
+                Focused JSON Path: <code>{highlightedJsonPath}</code>
+              </span>
+              <button
+                className="btn"
+                style={{ padding: '2px 6px', fontSize: 11 }}
+                onClick={() => setHighlightedJsonPath(null)}
+              >
+                Clear
+              </button>
+            </div>
+          )}
+
+          <div
+            style={{
+              display: 'flex',
+              gap: 6,
+              marginBottom: 8,
+              alignItems: 'center',
+            }}
+          >
+            <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+              Schema Autocomplete Helpers:
+            </span>
+            <button
+              className="btn"
+              style={{ padding: '2px 8px', fontSize: 11 }}
+              onClick={() => insertSchemaSnippet('screenRef')}
+            >
+              + screenRef
+            </button>
+            <button
+              className="btn"
+              style={{ padding: '2px 8px', fontSize: 11 }}
+              onClick={() => insertSchemaSnippet('flowRef')}
+            >
+              + flowRef
+            </button>
+            <button
+              className="btn"
+              style={{ padding: '2px 8px', fontSize: 11 }}
+              onClick={() => insertSchemaSnippet('rolePolicy')}
+            >
+              + rolePolicy
+            </button>
           </div>
-        )}
 
-        {activeTab === 'generator' && (
-          <div className="panel">
-            <h2>Generated Expo SDK 58 Project Output</h2>
-            <p className="subtitle">
-              Compile-time JSON-to-TypeScript/TSX output with ownership boundaries, manifest
-              checksums, and automated regression checks.
-            </p>
+          <textarea
+            className="form-input"
+            style={{
+              height: 250,
+              fontFamily: 'var(--font-mono)',
+              fontSize: 12,
+              resize: 'vertical',
+            }}
+            value={jsonDraft || currentJsonSource}
+            onChange={(e) => setJsonDraft(e.target.value)}
+          />
 
-            {!generatedBundle ? (
-              <div className="alert alert-error">
-                Code generation is blocked until blocking diagnostics are resolved.
-              </div>
-            ) : (
+          {jsonParseError && (
+            <div style={{ color: 'var(--danger)', fontSize: 12, marginTop: 8 }}>
+              JSON Parse Error: {jsonParseError}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            <button className="btn btn-primary" onClick={applyJsonDraft}>
+              Apply JSON Changes & Recompile
+            </button>
+            <button
+              className="btn"
+              onClick={() => {
+                setJsonDraft('');
+                setJsonParseError(null);
+              }}
+            >
+              Reset Draft
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <div className="panel-title">
+              Deterministic Expo SDK 58 Code Generator Output
+            </div>
+            <div className="panel-subtitle">
+              Inspect compiled nested route layouts, native SwiftUI / Compose renderers, and Auth runtime files
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <select
+              className="form-select"
+              style={{ width: 'auto', fontSize: 12, padding: '4px 8px' }}
+              value={outputTarget}
+              onChange={(e) =>
+                setOutputTarget(e.target.value as GenerationOutputTarget)
+              }
+            >
+              <option value="expo-app">Target: Runnable Expo App</option>
+              <option value="reusable-module">
+                Target: Reusable Module (Auth-only)
+              </option>
+            </select>
+            {generatedBundle && (
               <>
-                <div className="validation-checks-row">
-                  {generatedBundle.report.checks.map((chk) => (
-                    <div
-                      key={chk.id}
-                      className={`check-pill ${chk.passed ? 'passed' : 'failed'}`}
-                      title={chk.details}
-                    >
-                      {chk.passed ? '✓' : '✗'} {chk.name}
-                    </div>
-                  ))}
-                </div>
-
-                <div className="generator-explorer">
-                  <div className="file-tree">
-                    <div className="subnav-title">generated-expo-app/</div>
-                    {fileList.map((filePath) => {
-                      const f = generatedBundle.bundle.files[filePath];
-                      return (
-                        <button
-                          key={filePath}
-                          className={`file-item ${
-                            activeFile?.path === filePath ? 'active' : ''
-                          }`}
-                          onClick={() => setSelectedFilePath(filePath)}
-                        >
-                          <span>{filePath}</span>
-                          <small className={`ownership-tag ${f.ownership}`}>
-                            {f.ownership === 'user-protected' ? 'user' : 'gen'}
-                          </small>
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <div className="file-viewer">
-                    {activeFile && (
-                      <>
-                        <div className="file-viewer-header">
-                          <code>{activeFile.path}</code>
-                          <span>
-                            Ownership: <strong>{activeFile.ownership}</strong> · Checksum:{' '}
-                            <code>{activeFile.checksum}</code>
-                          </span>
-                        </div>
-                        <pre className="code-block file-code">{activeFile.content}</pre>
-                      </>
-                    )}
-                  </div>
-                </div>
+                <span className="badge badge-info">
+                  {generatedBundle.fileList.length} Files Generated
+                </span>
+                <button
+                  className="btn btn-primary"
+                  onClick={downloadGeneratedBundle}
+                >
+                  Export Bundle JSON
+                </button>
               </>
             )}
           </div>
+        </div>
+
+        {!generatedBundle ? (
+          <div style={{ color: 'var(--danger)', fontSize: 13 }}>
+            Resolve blocking compiler errors above to generate the Expo SDK 58 project bundle.
+          </div>
+        ) : (
+          <div className="grid-sidebar">
+            <div className="file-tree">
+              {generatedBundle.fileList.map((filePath) => (
+                <button
+                  key={filePath}
+                  className={`file-item ${
+                    filePath === activeFilePath ? 'active' : ''
+                  }`}
+                  onClick={() => setSelectedFile(filePath)}
+                >
+                  {filePath}
+                </button>
+              ))}
+            </div>
+            <div>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  marginBottom: 8,
+                  alignItems: 'center',
+                }}
+              >
+                <code>{activeFilePath}</code>
+                <span className="badge badge-success">
+                  Output Validation:{' '}
+                  {generatedBundle.validation.valid ? 'PASSED' : 'FAILED'}
+                </span>
+              </div>
+              <pre className="code-viewer">
+                {generatedBundle.files[activeFilePath]}
+              </pre>
+            </div>
+          </div>
         )}
-      </main>
+      </div>
     </div>
   );
 }

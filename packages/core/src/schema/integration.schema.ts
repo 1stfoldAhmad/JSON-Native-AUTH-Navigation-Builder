@@ -1,6 +1,6 @@
 export const INTEGRATION_JSON_SCHEMA = {
   $id: 'https://expo-foundation.dev/schemas/integration.schema.json',
-  title: 'ExpoFoundationIntegrationConfig',
+  title: 'ExpoAuthNavigationIntegrationConfig',
   type: 'object',
   required: ['schemaVersion', 'authNavigation'],
   additionalProperties: false,
@@ -9,6 +9,17 @@ export const INTEGRATION_JSON_SCHEMA = {
     builderVersion: { type: 'string' },
     projectId: { type: 'string' },
     moduleId: { type: 'string' },
+    target: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        expoSdk: { type: 'number' },
+        platforms: {
+          type: 'array',
+          items: { type: 'string', enum: ['ios', 'android'] },
+        },
+      },
+    },
     createdAt: { type: 'string' },
     updatedAt: { type: 'string' },
     id: { type: 'string' },

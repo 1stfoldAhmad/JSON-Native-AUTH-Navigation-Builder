@@ -4,11 +4,24 @@ export type PlatformTarget = 'ios' | 'android';
 
 export type CompilationMode = 'strict-native' | 'automatic-fallback' | 'diagnostic';
 
+export type VerificationStatus =
+  | 'documented'
+  | 'simulated'
+  | 'native-verified'
+  | 'unsupported'
+  | 'unverified';
+
+export interface ProjectTargetProfile {
+  expoSdk: number;
+  platforms: PlatformTarget[];
+}
+
 export interface DocumentMetadata {
   schemaVersion: string;
   builderVersion?: string;
   projectId?: string;
   moduleId?: string;
+  target?: ProjectTargetProfile;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -25,6 +38,12 @@ export type AccessPolicy =
   | {
       permissions: string[];
       mode?: 'any' | 'all';
+    }
+  | {
+      accountStatus: string[];
+    }
+  | {
+      tenantId: string;
     };
 
 export type AuthStatus =
@@ -48,6 +67,7 @@ export interface AccessContext {
   verified: boolean;
   tenantId?: string;
   accountStatus?: string;
+  issuedAt?: number;
 }
 
 /**
@@ -174,11 +194,23 @@ export interface NavigatorDefinition {
   splitOptions?: SplitNavigatorOptions;
 }
 
+export type RouteParamScalarType =
+  | 'string'
+  | 'number'
+  | 'boolean'
+  | 'enum'
+  | 'date'
+  | 'uuid'
+  | 'custom-scalar'
+  | 'array';
+
 export interface RouteParamSchema {
-  type: 'string' | 'number' | 'boolean' | 'enum';
+  type: RouteParamScalarType;
   required?: boolean;
-  default?: string | number | boolean;
+  default?: string | number | boolean | string[];
   enumValues?: string[];
+  itemType?: 'string' | 'number' | 'boolean';
+  pattern?: string;
   source?: 'path' | 'query';
 }
 
@@ -267,16 +299,29 @@ export interface IntegrationConfigDocument extends DocumentMetadata {
 }
 
 /**
- * Section 16 Diagnostics Contract
+ * Section 16 & Section 17.H Diagnostics Contract
  */
 export type DiagnosticSeverity = 'error' | 'warning' | 'info';
+
+export type DiagnosticCategory =
+  | 'schema'
+  | 'provider'
+  | 'auth'
+  | 'session-security'
+  | 'navigation-graph'
+  | 'capability'
+  | 'integration'
+  | 'generator'
+  | 'build';
 
 export interface Diagnostic {
   code: string;
   severity: DiagnosticSeverity;
-  document: 'auth' | 'navigation' | 'integration' | 'system';
+  category?: DiagnosticCategory;
+  document: 'auth' | 'navigation' | 'integration' | 'system' | 'project';
   jsonPath: string;
   message: string;
   suggestion: string;
   canGenerate: boolean;
+  platform?: PlatformTarget;
 }

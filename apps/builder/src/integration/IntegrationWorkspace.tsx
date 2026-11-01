@@ -1,382 +1,471 @@
 import React, { useMemo, useState } from 'react';
-import { AuthController, RestAuthProviderAdapter } from '@expo-foundation/auth';
-import { FoundationEventBus } from '@expo-foundation/contracts';
-import {
-  defaultFoundationCompiler,
-  type AuthConfigDocument,
-  type IntegrationConfigDocument,
-  type NavigationConfigDocument,
+import { AuthController, InMemoryTokenStorage } from '@expo-foundation/auth';
+import { FoundationEventBus, InMemoryFlowRegistry } from '@expo-foundation/contracts';
+import type {
+  IntegrationConfigDocument,
+  NavigationConfigDocument,
+  ProjectIR,
 } from '@expo-foundation/core';
 import { AuthNavigationBridge } from '@expo-foundation/integration';
 import {
-  AndroidNavigationAdapter,
+  AndroidNativeNavigationAdapter,
   IOSNativeNavigationAdapter,
   NavigationStateManager,
 } from '@expo-foundation/navigation';
+import {
+  createMockSession,
+  MockAuthProviderAdapter,
+} from '@expo-foundation/testing';
 
-export interface IntegrationWorkspaceProps {
-  authConfig: AuthConfigDocument | null;
-  navigationConfig: NavigationConfigDocument | null;
-  integrationConfig: IntegrationConfigDocument | null;
+interface Props {
+  config: IntegrationConfigDocument;
+  navigationConfig?: NavigationConfigDocument;
+  projectIR: ProjectIR;
   onChange: (next: IntegrationConfigDocument) => void;
 }
 
 export function IntegrationWorkspace({
-  authConfig,
+  config,
   navigationConfig,
-  integrationConfig,
+  projectIR,
   onChange,
-}: IntegrationWorkspaceProps) {
-  const [simTick, setSimTick] = useState(0);
-  const [deepLinkInput, setDeepLinkInput] = useState('https://example.com/orders/ORD-1024');
-  const [rawJsonText, setRawJsonText] = useState(() =>
-    integrationConfig ? JSON.stringify(integrationConfig, null, 2) : ''
+}: Props) {
+  const [simLogs, setSimLogs] = useState<string[]>([]);
+  const [simDeepLinkUrl, setSimDeepLinkUrl] = useState<string>(
+    'efshop://orders/ORD-7781?tab=tracking'
   );
-  const [showJson, setShowJson] = useState(false);
+  const [, setTick] = useState(0);
 
-  const runtimeHarness = useMemo(() => {
-    if (!authConfig || !navigationConfig || !integrationConfig) {
-      return null;
-    }
-    const compiled = defaultFoundationCompiler.compile({
-      auth: authConfig,
-      navigation: navigationConfig,
-      integration: integrationConfig,
-    });
-    if (!compiled.ir?.auth || !compiled.ir.navigation || !compiled.ir.integration) {
+  const appendLog = (msg: string) => {
+    setSimLogs((prev) => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev.slice(0, 29)]);
+  };
+
+  const runtime = useMemo(() => {
+    if (!projectIR.auth || !projectIR.navigation || !projectIR.integration) {
       return null;
     }
 
     const eventBus = new FoundationEventBus();
-    const adapter = new RestAuthProviderAdapter({
-      httpClient: async (req) => ({
-        status: 200,
-        ok: true,
-        data: {
-          data: {
-            access_token: 'sim_access_token_hidden',
-            refresh_token: 'sim_refresh_token_hidden',
-            expires_in: 3600,
-            verification_required: req.url.endsWith('/register'),
-            user: {
-              id: 'usr_sim_1',
-              email: 'architect@expo.dev',
-              emailVerified: !req.url.endsWith('/register'),
-              roles: ['user'],
-              permissions: ['orders.read'],
-            },
-          },
-        },
-      }),
+    const flowRegistry = new InMemoryFlowRegistry();
+
+    for (const flowId of Object.values(projectIR.auth.eventFlows)) {
+      if (flowId) {
+        flowRegistry.register(flowId, () => {});
+      }
+    }
+
+    // Use isolated MockAuthProviderAdapter from @expo-foundation/testing for interactive UI preview
+    const mockAdapter = new MockAuthProviderAdapter({
+      providerType: projectIR.auth.providerType,
+      defaultRoles: projectIR.auth.defaultRoles,
+      defaultPermissions: ['orders.read'],
     });
 
     const authController = new AuthController({
-      authIR: compiled.ir.auth,
-      adapter,
+      authIR: projectIR.auth,
+      adapter: mockAdapter,
+      storage: new InMemoryTokenStorage(),
+      eventBus,
+      flowRegistry,
+    });
+
+    const navManager = new NavigationStateManager({
+      navigationIR: projectIR.navigation,
       eventBus,
     });
-    const navStateManager = new NavigationStateManager({
-      navigationIR: compiled.ir.navigation,
-      eventBus,
-    });
+
     const bridge = new AuthNavigationBridge({
-      integrationIR: compiled.ir.integration,
       authController,
-      navigationStateManager: navStateManager,
+      navigationStateManager: navManager,
+      navigationIR: projectIR.navigation,
+      integrationIR: projectIR.integration,
       eventBus,
+      flowRegistry,
     });
-    const iosAdapter = new IOSNativeNavigationAdapter(navStateManager);
-    const androidAdapter = new AndroidNavigationAdapter(navStateManager);
+
+    const iosAdapter = new IOSNativeNavigationAdapter(
+      projectIR.navigation,
+      navManager
+    );
+    const androidAdapter = new AndroidNativeNavigationAdapter(
+      projectIR.navigation,
+      navManager
+    );
 
     return {
       authController,
-      navStateManager,
+      mockAdapter,
+      navManager,
       bridge,
       iosAdapter,
       androidAdapter,
       eventBus,
+      flowRegistry,
     };
-  }, [authConfig, navigationConfig, integrationConfig]);
+  }, [projectIR]);
 
-  if (!integrationConfig || !authConfig || !navigationConfig) {
-    return (
-      <div className="panel empty-panel">
-        <h3>Integration Workspace Requires Both Auth & Navigation Configs</h3>
-        <p>
-          Switch to <strong>Complete Foundation</strong> mode in the top bar to configure
-          Auth-to-Navigation integration, route guards, and intended-destination restoration.
-        </p>
-      </div>
+  const forceRefresh = () => setTick((t) => t + 1);
+
+  const routeOptions = useMemo(() => {
+    if (!navigationConfig) return [];
+    return [
+      ...navigationConfig.routes.map((r) => r.id),
+      ...navigationConfig.navigators.map((n) => n.id),
+    ];
+  }, [navigationConfig]);
+
+  const updateField = (
+    field: keyof IntegrationConfigDocument['authNavigation'],
+    value: unknown
+  ) => {
+    onChange({
+      ...config,
+      authNavigation: {
+        ...config.authNavigation,
+        [field]: value,
+      },
+    });
+  };
+
+  const runInitialize = async () => {
+    if (!runtime) return;
+    const res = await runtime.bridge.initialize();
+    appendLog(
+      `Initialized runtime -> Auth: ${res.auth.status}, Active Route: ${res.navigation.currentRouteId}`
     );
-  }
+    forceRefresh();
+  };
 
-  const routeIds = navigationConfig.routes.map((r) => r.id);
-  const bump = () => setSimTick((x) => x + 1);
+  const runLogin = async (role = 'user') => {
+    if (!runtime) return;
+    await runtime.authController.initialize();
+    const snap = await runtime.authController.signIn({
+      email: role === 'admin' ? 'admin@expo.dev' : 'customer@expo.dev',
+      password: 'Password123!',
+    });
+
+    if (role === 'admin' && snap.session) {
+      // Simulate server returning elevated admin role via trusted provider getCurrentUser()
+      const adminSession = createMockSession({
+        user: {
+          id: snap.session.user.id,
+          email: snap.session.user.email,
+          roles: ['admin', 'user'],
+          permissions: ['orders.read', 'admin.access'],
+          emailVerified: true,
+        },
+      });
+      viLikeSetMockUser(runtime.mockAdapter, adminSession);
+      await runtime.authController.refreshAccessContextFromServer();
+    }
+
+    const navState = runtime.navManager.getState();
+    appendLog(
+      `Login completed (${role}) -> Auth: ${snap.status}, Redirected to: ${navState.currentRouteId} (${navState.currentPath})`
+    );
+    forceRefresh();
+  };
+
+  const runLogout = async () => {
+    if (!runtime) return;
+    await runtime.authController.signOut();
+    const navState = runtime.navManager.getState();
+    appendLog(
+      `Signed out -> Auth: anonymous, Reset to: ${navState.currentRouteId}`
+    );
+    forceRefresh();
+  };
+
+  const runDeepLink = () => {
+    if (!runtime) return;
+    const res = runtime.bridge.handleDeepLink(simDeepLinkUrl);
+    const navState = runtime.navManager.getState();
+    appendLog(
+      `DeepLink "${simDeepLinkUrl}" -> status: ${res.status}, activeRoute: ${navState.currentRouteId}${
+        res.reason ? ` (${res.reason})` : ''
+      }`
+    );
+    forceRefresh();
+  };
+
+  const runNavigate = (routeId: string) => {
+    if (!runtime) return;
+    const next = runtime.navManager.navigate(routeId, {
+      orderId: 'ORD-5801',
+      productId: 'PROD-42',
+    });
+    appendLog(
+      `Navigate("${routeId}") -> Active Route: ${next.currentRouteId} (${next.currentPath})`
+    );
+    forceRefresh();
+  };
+
+  const authSnap = runtime?.authController.getSnapshot();
+  const navSnap = runtime?.navManager.getState();
 
   return (
-    <div className="workspace-layout single-col">
+    <div className="grid-2">
       <div className="panel">
-        <div className="panel-header-row">
+        <div className="panel-header">
           <div>
-            <h2>Auth & Navigation Integration Engine</h2>
-            <p className="subtitle">
-              Connects authentication lifecycle events to route guards, entry points, and
-              intended-destination restoration without coupling either builder.
-            </p>
+            <div className="panel-title">Auth-Navigation Integration Policy</div>
+            <div className="panel-subtitle">
+              Configure entry routes, post-login redirects, deferred deep-link restoration, and role groups
+            </div>
           </div>
-          <button
-            className="btn"
-            onClick={() => {
-              setRawJsonText(JSON.stringify(integrationConfig, null, 2));
-              setShowJson(!showJson);
-            }}
-          >
-            {showJson ? 'Show Visual Inspector' : 'Edit integration.json Source'}
-          </button>
+          <label className="checkbox-item" style={{ padding: '4px 10px' }}>
+            <input
+              type="checkbox"
+              checked={config.authNavigation.enabled}
+              onChange={(e) => updateField('enabled', e.target.checked)}
+            />
+            Enabled
+          </label>
         </div>
 
-        {showJson ? (
-          <textarea
-            className="json-textarea"
-            rows={18}
-            value={rawJsonText}
-            onChange={(e) => {
-              setRawJsonText(e.target.value);
-              try {
-                const parsed = JSON.parse(e.target.value) as IntegrationConfigDocument;
-                onChange(parsed);
-              } catch {
-                // wait until valid JSON
-              }
-            }}
-          />
-        ) : (
-          <div className="form-grid">
-            <label>
-              <span>Guest Entry Route</span>
-              <select
-                value={integrationConfig.authNavigation.guestEntry}
-                onChange={(e) =>
-                  onChange({
-                    ...integrationConfig,
-                    authNavigation: {
-                      ...integrationConfig.authNavigation,
-                      guestEntry: e.target.value,
-                    },
-                  })
-                }
-              >
-                {routeIds.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              <span>Authenticated Entry Route</span>
-              <select
-                value={integrationConfig.authNavigation.authenticatedEntry}
-                onChange={(e) =>
-                  onChange({
-                    ...integrationConfig,
-                    authNavigation: {
-                      ...integrationConfig.authNavigation,
-                      authenticatedEntry: e.target.value,
-                    },
-                  })
-                }
-              >
-                {routeIds.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              <span>After Login Policy</span>
-              <select
-                value={integrationConfig.authNavigation.afterLogin}
-                onChange={(e) =>
-                  onChange({
-                    ...integrationConfig,
-                    authNavigation: {
-                      ...integrationConfig.authNavigation,
-                      afterLogin: e.target.value,
-                    },
-                  })
-                }
-              >
-                <option value="restore-intended-destination">
-                  restore-intended-destination
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Guest Entry Route</label>
+            <select
+              className="form-select"
+              value={config.authNavigation.guestEntry}
+              onChange={(e) => updateField('guestEntry', e.target.value)}
+            >
+              {routeOptions.map((r) => (
+                <option key={r} value={r}>
+                  {r}
                 </option>
-                {routeIds.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              <span>After Logout Destination</span>
-              <select
-                value={integrationConfig.authNavigation.afterLogout}
-                onChange={(e) =>
-                  onChange({
-                    ...integrationConfig,
-                    authNavigation: {
-                      ...integrationConfig.authNavigation,
-                      afterLogout: e.target.value,
-                    },
-                  })
-                }
-              >
-                {routeIds.map((id) => (
-                  <option key={id} value={id}>
-                    {id}
-                  </option>
-                ))}
-              </select>
-            </label>
+              ))}
+            </select>
           </div>
-        )}
+
+          <div className="form-group">
+            <label className="form-label">Authenticated Entry Route / Navigator</label>
+            <select
+              className="form-select"
+              value={config.authNavigation.authenticatedEntry}
+              onChange={(e) => updateField('authenticatedEntry', e.target.value)}
+            >
+              {routeOptions.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">After Login Behavior</label>
+            <select
+              className="form-select"
+              value={config.authNavigation.afterLogin}
+              onChange={(e) => updateField('afterLogin', e.target.value)}
+            >
+              <option value="restore-intended-destination">
+                restore-intended-destination (Replay Deferred Deep Link)
+              </option>
+              {routeOptions.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">After Registration Route</label>
+            <select
+              className="form-select"
+              value={config.authNavigation.afterRegistration}
+              onChange={(e) => updateField('afterRegistration', e.target.value)}
+            >
+              {routeOptions.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        <div className="form-row">
+          <div className="form-group">
+            <label className="form-label">Verification Required Route</label>
+            <select
+              className="form-select"
+              value={config.authNavigation.verificationRoute ?? ''}
+              onChange={(e) => updateField('verificationRoute', e.target.value)}
+            >
+              {routeOptions.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="form-group">
+            <label className="form-label">Access Denied Route</label>
+            <select
+              className="form-select"
+              value={config.authNavigation.accessDeniedRoute ?? ''}
+              onChange={(e) => updateField('accessDeniedRoute', e.target.value)}
+            >
+              {routeOptions.map((r) => (
+                <option key={r} value={r}>
+                  {r}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
       </div>
 
-      {runtimeHarness && (
-        <div className="panel" data-sim-tick={simTick}>
-          <h3>Interactive End-to-End Auth & Native Navigation Simulator</h3>
-          <p className="subtitle">
-            Test deep-link deferral, login destination restoration, tab stack preservation, iOS
-            native back-swipe, Android hardware back, and logout history reset in real time.
-          </p>
-
-          <div className="simulator-toolbar">
-            <button
-              className="btn btn-sm"
-              onClick={async () => {
-                await runtimeHarness.authController.initialize();
-                bump();
-              }}
-            >
-              1. App Startup / Restore
-            </button>
-            <button
-              className="btn btn-sm"
-              onClick={() => {
-                runtimeHarness.bridge.handleDeepLink(deepLinkInput);
-                bump();
-              }}
-            >
-              2. Open Deep Link ({deepLinkInput})
-            </button>
-            <button
-              className="btn btn-sm btn-primary"
-              onClick={async () => {
-                await runtimeHarness.authController.initialize();
-                await runtimeHarness.authController.signIn({
-                  email: 'architect@expo.dev',
-                  password: 'password123',
-                });
-                bump();
-              }}
-            >
-              3. Sign In (Restores Intended Route)
-            </button>
-            <button
-              className="btn btn-sm"
-              onClick={() => {
-                runtimeHarness.iosAdapter.onNativeTabSelect('tab.search.stack');
-                runtimeHarness.navStateManager.push('app.products.detail', {
-                  productId: 'PROD-2026',
-                });
-                bump();
-              }}
-            >
-              4. Switch to Search Tab & Push Detail
-            </button>
-            <button
-              className="btn btn-sm"
-              onClick={() => {
-                runtimeHarness.androidAdapter.handleHardwareBack();
-                bump();
-              }}
-            >
-              5. Android Hardware Back / iOS Swipe Back
-            </button>
-            <button
-              className="btn btn-sm"
-              onClick={async () => {
-                await runtimeHarness.authController.signOut();
-                bump();
-              }}
-            >
-              6. Sign Out (Clears Protected History)
-            </button>
-          </div>
-
-          <div className="form-grid" style={{ marginBottom: '12px' }}>
-            <label>
-              <span>Deep Link URL to Simulate</span>
-              <input
-                type="text"
-                value={deepLinkInput}
-                onChange={(e) => setDeepLinkInput(e.target.value)}
-              />
-            </label>
-          </div>
-
-          <div className="split-preview three-col">
-            <div>
-              <h4>Auth State & Access Context</h4>
-              <pre className="code-block">
-                {JSON.stringify(
-                  {
-                    status: runtimeHarness.authController.getState().status,
-                    accessContext: runtimeHarness.authController.getAccessContext(),
-                    intendedDestination:
-                      runtimeHarness.bridge.deepLinkManager.getIntendedDestination(),
-                  },
-                  null,
-                  2
-                )}
-              </pre>
-            </div>
-
-            <div>
-              <h4>iOS SwiftUI & Android Compose State</h4>
-              <pre className="code-block">
-                {JSON.stringify(
-                  {
-                    activeRouteId: runtimeHarness.navStateManager.getState().activeRouteId,
-                    params: runtimeHarness.navStateManager.getState().params,
-                    historyDepth: runtimeHarness.navStateManager.getState().history.length,
-                    iosNavigationStack:
-                      runtimeHarness.iosAdapter.getNavigationStackDescriptor(),
-                    androidStack: runtimeHarness.androidAdapter.getStackDescriptor(),
-                  },
-                  null,
-                  2
-                )}
-              </pre>
-            </div>
-
-            <div>
-              <h4>Sanitized FoundationEventBus Log</h4>
-              <pre className="code-block">
-                {JSON.stringify(
-                  runtimeHarness.eventBus.getHistory().slice(-8),
-                  null,
-                  2
-                )}
-              </pre>
+      <div className="panel">
+        <div className="panel-header">
+          <div>
+            <div className="panel-title">Interactive Runtime Simulator</div>
+            <div className="panel-subtitle">
+              Test startup session restoration, route guards, deferred deep links, and role checks
             </div>
           </div>
+          {authSnap && (
+            <span
+              className={`badge ${
+                authSnap.status === 'authenticated'
+                  ? 'badge-success'
+                  : 'badge-warning'
+              }`}
+            >
+              Auth: {authSnap.status.toUpperCase()}
+            </span>
+          )}
         </div>
-      )}
+
+        {!runtime ? (
+          <div style={{ color: 'var(--text-secondary)', fontSize: 13 }}>
+            Select the &ldquo;Complete E-Commerce Auth + Navigation&rdquo; preset to run the
+            interactive Auth + Navigation simulator.
+          </div>
+        ) : (
+          <>
+            <div
+              style={{
+                display: 'flex',
+                gap: 8,
+                flexWrap: 'wrap',
+                marginBottom: 14,
+              }}
+            >
+              <button className="btn" onClick={runInitialize}>
+                1. Boot / Restore Session
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={() => runLogin('user')}
+              >
+                2. Sign In (User)
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={() => runLogin('admin')}
+              >
+                Sign In (Admin Role)
+              </button>
+              <button className="btn" onClick={runLogout}>
+                Sign Out
+              </button>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">
+                Simulate Incoming Deep Link / Universal Link
+              </label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  className="form-input"
+                  value={simDeepLinkUrl}
+                  onChange={(e) => setSimDeepLinkUrl(e.target.value)}
+                />
+                <button className="btn btn-primary" onClick={runDeepLink}>
+                  Dispatch URL
+                </button>
+              </div>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">
+                Test Route Navigation (Protected & Public Routes)
+              </label>
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {Object.keys(projectIR.navigation?.routes ?? {}).map((rId) => (
+                  <button
+                    key={rId}
+                    className="btn"
+                    style={{ padding: '4px 10px', fontSize: 12 }}
+                    onClick={() => runNavigate(rId)}
+                  >
+                    Go: {rId}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {navSnap && (
+              <div
+                style={{
+                  background: '#090d16',
+                  border: '1px solid var(--border)',
+                  borderRadius: 8,
+                  padding: 12,
+                  marginBottom: 12,
+                  fontSize: 12,
+                }}
+              >
+                <div>
+                  <strong>Current Route:</strong>{' '}
+                  <code>{navSnap.currentRouteId}</code> ({navSnap.currentPath})
+                </div>
+                <div>
+                  <strong>Active Stack History:</strong>{' '}
+                  {navSnap.history.map((h) => h.routeId).join(' → ')}
+                </div>
+                <div>
+                  <strong>Deferred Intended Destination:</strong>{' '}
+                  {navSnap.intendedDestination
+                    ? `${navSnap.intendedDestination.routeId} (${navSnap.intendedDestination.path})`
+                    : 'None'}
+                </div>
+                <div>
+                  <strong>Access Context:</strong> Roles: [
+                  {authSnap?.accessContext.roles.join(', ')}], Verified:{' '}
+                  {String(authSnap?.accessContext.verified)}
+                </div>
+              </div>
+            )}
+
+            <div className="form-label">Runtime Event & Transition Log</div>
+            <pre className="code-viewer" style={{ maxHeight: 160 }}>
+              {simLogs.length > 0
+                ? simLogs.join('\n')
+                : 'Click "1. Boot / Restore Session" or "Dispatch URL" to trace runtime execution...'}
+            </pre>
+          </>
+        )}
+      </div>
     </div>
   );
+}
+
+function viLikeSetMockUser(
+  mockAdapter: MockAuthProviderAdapter,
+  session: ReturnType<typeof createMockSession>
+): void {
+  (
+    mockAdapter as unknown as {
+      currentSession: ReturnType<typeof createMockSession>;
+    }
+  ).currentSession = session;
 }

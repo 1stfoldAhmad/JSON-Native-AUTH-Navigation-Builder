@@ -1,159 +1,175 @@
 import { describe, expect, it } from 'vitest';
-import { defaultFoundationCompiler } from '@expo-foundation/core';
 import {
-  AndroidNavigationAdapter,
+  FoundationCompiler,
+  type NavigationConfigDocument,
+} from '@expo-foundation/core';
+import {
   DeepLinkManager,
   IOSNativeNavigationAdapter,
-  NavigationGraphEngine,
   NavigationStateManager,
-  ParameterResolver,
   RouteRegistry,
 } from '@expo-foundation/navigation';
-import navOnlyJson from '../../examples/navigation-only/navigation.json' with { type: 'json' };
+import completeNavDoc from '../../examples/complete-foundation/navigation.json' with { type: 'json' };
+import { runIOSNativeNavigationPoc } from '../../examples/native-navigation-poc/ios/ios-poc-runner.js';
+import { runAndroidNativeNavigationPoc } from '../../examples/native-navigation-poc/android/android-poc-runner.js';
 
 describe('@expo-foundation/navigation', () => {
-  it('compiles and runs Navigation-Only mode independently without Auth Builder', () => {
-    const compiled = defaultFoundationCompiler.compile({ navigation: navOnlyJson });
-    expect(compiled.canGenerate).toBe(true);
-    expect(compiled.ir?.projectMetadata.mode).toBe('navigation-only');
-    expect(compiled.ir?.auth).toBeNull();
-    expect(compiled.ir?.navigation).not.toBeNull();
+  const compiler = new FoundationCompiler();
+  const projectIR = compiler.compile({
+    navigation: completeNavDoc as unknown as NavigationConfigDocument,
   });
+  const navIR = projectIR.navigation!;
 
-  it('builds RouteRegistry and NavigationGraphEngine with ancestor and reachability analysis', () => {
-    const compiled = defaultFoundationCompiler.compile({ navigation: navOnlyJson });
-    const navIR = compiled.ir!.navigation!;
+  it('validates and builds typed route paths and query parameters in RouteRegistry', () => {
+    const registry = new RouteRegistry(navIR);
 
-    const registry = RouteRegistry.fromNavigationIR(navIR);
-    expect(registry.has('catalog.home')).toBe(true);
-    expect(registry.getById('catalog.product.detail')?.screenRef).toBe(
-      'screen.catalog.product-detail'
-    );
-
-    const graph = NavigationGraphEngine.fromNavigationIR(navIR);
-    expect(graph.resolveInitialRouteId()).toBe('catalog.home');
-    expect(graph.getAncestorChain('catalog.product.detail')).toEqual([
-      'root.stack',
-      'app.tabs',
-      'tab.home.stack',
-      'catalog.product.detail',
-    ]);
-    expect(graph.toTree()?.id).toBe('root.stack');
-  });
-
-  it('validates, coerces, and serializes typed route parameters via ParameterResolver', () => {
-    const resolver = new ParameterResolver();
-    const matched = resolver.matchPath(
-      '/products/:productId',
-      '/products/PROD-42?page=3&featured=true'
-    );
-    expect(matched.matched).toBe(true);
-    expect(matched.rawParams.productId).toBe('PROD-42');
-    expect(matched.rawParams.page).toBe('3');
-
-    const coerced = resolver.validateAndCoerce(
-      {
-        productId: { type: 'string', required: true },
-        page: { type: 'number', required: false, default: 1 },
-        featured: { type: 'boolean', required: false },
-        sort: { type: 'enum', required: false, enumValues: ['asc', 'desc'], default: 'asc' },
-      },
-      matched.rawParams
-    );
-
-    expect(coerced.valid).toBe(true);
-    expect(coerced.params.productId).toBe('PROD-42');
-    expect(coerced.params.page).toBe(3);
-    expect(coerced.params.featured).toBe(true);
-    expect(coerced.params.sort).toBe('asc');
-
-    // Invalid parameter must fail validation
-    const invalid = resolver.validateAndCoerce(
-      {
-        productId: { type: 'string', required: true },
-        page: { type: 'number', required: true },
-      },
-      { productId: 'PROD-42', page: 'not-a-number' }
-    );
-    expect(invalid.valid).toBe(false);
-    expect(invalid.errors[0]).toContain('valid number');
-  });
-
-  it('synchronizes iOS SwiftUI NavigationStack controlled path and TabView per-tab stacks', () => {
-    const compiled = defaultFoundationCompiler.compile({ navigation: navOnlyJson });
-    const stateManager = new NavigationStateManager({
-      navigationIR: compiled.ir!.navigation!,
+    const path = registry.buildPath('order-detail', {
+      orderId: 'ORD-500',
+      tab: 'items',
     });
-    const iosAdapter = new IOSNativeNavigationAdapter(stateManager);
+    expect(path).toBe('/orders/ORD-500?tab=items');
 
-    iosAdapter.onNativeTabSelect('tab.home.stack');
-    stateManager.push('catalog.product.detail', { productId: 'IPHONE-17' });
-
-    const stackDesc = iosAdapter.getNavigationStackDescriptor();
-    expect(stackDesc.component).toBe('NavigationStack');
-    expect(stackDesc.importSource).toBe('@expo/ui/swift-ui');
-    expect(stackDesc.activeRouteId).toBe('catalog.product.detail');
-    expect(stackDesc.params.productId).toBe('IPHONE-17');
-
-    // Switch to Search tab, then return to Home tab -> preserves product detail on Home stack
-    iosAdapter.onNativeTabSelect('tab.search.stack');
-    expect(stateManager.getState().activeRouteId).toBe('catalog.search');
-
-    iosAdapter.onNativeTabSelect('tab.home.stack');
-    expect(stateManager.getState().activeRouteId).toBe('catalog.product.detail');
-
-    // Native iOS interactive swipe-back pops back to catalog.home
-    iosAdapter.onNativePathChange(['catalog.home']);
-    expect(stateManager.getState().activeRouteId).toBe('catalog.home');
-  });
-
-  it('handles Android Jetpack Compose NavigationBar, NativeTabs fallback, and hardware back', () => {
-    const compiled = defaultFoundationCompiler.compile({ navigation: navOnlyJson });
-    const stateManager = new NavigationStateManager({
-      navigationIR: compiled.ir!.navigation!,
+    const defaultTabPath = registry.buildPath('order-detail', {
+      orderId: 'ORD-501',
     });
-    const androidCompose = new AndroidNavigationAdapter(stateManager, {
-      useNativeTabsFallback: false,
-    });
-    expect(androidCompose.getTabsDescriptor('app.tabs').barComponent).toBe('NavigationBar');
-
-    const androidFallback = new AndroidNavigationAdapter(stateManager, {
-      useNativeTabsFallback: true,
-    });
-    expect(androidFallback.getTabsDescriptor('app.tabs').barComponent).toBe('NativeTabs');
-
-    // Open modal, then press Android hardware back -> closes modal first
-    stateManager.openModal('modal.filter');
-    expect(stateManager.getState().modalStack).toEqual(['modal.filter']);
-
-    const afterModalBack = androidCompose.handleHardwareBack();
-    expect(afterModalBack.handled).toBe(true);
-    expect(afterModalBack.state.modalStack).toHaveLength(0);
-  });
-
-  it('resolves deep links and rejects untrusted hosts or external redirect injections', () => {
-    const compiled = defaultFoundationCompiler.compile({ navigation: navOnlyJson });
-    const stateManager = new NavigationStateManager({
-      navigationIR: compiled.ir!.navigation!,
-    });
-    const dlManager = new DeepLinkManager(
-      stateManager.registry,
-      stateManager,
-      compiled.ir!.navigation!.linking
-    );
-
-    const okLink = dlManager.handleIncomingUrl(
-      'https://catalog.example.com/products/MACBOOK-M5'
-    );
-    expect(okLink.status).toBe('navigated');
-    expect(okLink.matchedRouteId).toBe('catalog.product.detail');
-    expect(okLink.params?.productId).toBe('MACBOOK-M5');
-
-    const untrustedHost = dlManager.handleIncomingUrl('https://evil.example.org/products/123');
-    expect(untrustedHost.status).toBe('invalid_url');
+    expect(defaultTabPath).toBe('/orders/ORD-501?tab=summary');
 
     expect(() =>
-      dlManager.setIntendedDestination('https://phishing.site/steal')
-    ).toThrow(/external URL/i);
+      registry.buildPath('order-detail', {
+        orderId: 'ORD-502',
+        tab: 'invalid_enum_value',
+      })
+    ).toThrow(/must be one of/);
+  });
+
+  it('preserves per-tab stack history on switchTab without duplicating rootHistory (Finding 10)', () => {
+    const sm = new NavigationStateManager({
+      navigationIR: navIR,
+      initialAccessContext: {
+        authenticated: true,
+        userId: 'usr_1',
+        roles: ['user'],
+        permissions: ['orders.read'],
+        verified: true,
+      },
+    });
+
+    sm.reset('main-tabs');
+    expect(sm.getState().currentRouteId).toBe('home');
+    expect(sm.getState().rootHistory).toHaveLength(1);
+
+    // Push order-detail inside home-stack
+    sm.push('order-detail', { orderId: 'ORD-100' });
+    expect(sm.getState().currentRouteId).toBe('order-detail');
+    expect(sm.getState().tabHistories['home-stack']).toHaveLength(2);
+
+    // Switch to search-stack and push product-detail
+    sm.switchTab('main-tabs', 'search-stack');
+    expect(sm.getState().currentRouteId).toBe('search');
+    sm.push('product-detail', { productId: 'PROD-99' });
+    expect(sm.getState().currentRouteId).toBe('product-detail');
+    expect(sm.getState().tabHistories['search-stack']).toHaveLength(2);
+
+    // Switch back to home-stack -> restores order-detail without growing rootHistory!
+    const restoredHome = sm.switchTab('main-tabs', 'home-stack');
+    expect(restoredHome.currentRouteId).toBe('order-detail');
+    expect(restoredHome.currentParams.orderId).toBe('ORD-100');
+    expect(restoredHome.rootHistory).toHaveLength(1);
+
+    // Pop inside home-stack returns to home
+    const poppedHome = sm.back();
+    expect(poppedHome.currentRouteId).toBe('home');
+    expect(poppedHome.tabHistories['home-stack']).toHaveLength(1);
+    expect(poppedHome.tabHistories['search-stack']).toHaveLength(2);
+  });
+
+  it('reconciles full route sequence in IOSNativeNavigationAdapter.onNativePathChange (Finding 11)', () => {
+    const sm = new NavigationStateManager({
+      navigationIR: navIR,
+      initialAccessContext: {
+        authenticated: true,
+        userId: 'usr_1',
+        roles: ['user'],
+        permissions: ['orders.read'],
+        verified: true,
+      },
+    });
+
+    const iosAdapter = new IOSNativeNavigationAdapter(navIR, sm);
+    sm.reset('main-tabs');
+    sm.push('order-detail', { orderId: 'ORD-1' });
+    expect(sm.getState().history.map((h) => h.routeId)).toEqual([
+      'home',
+      'order-detail',
+    ]);
+
+    // Equal-length route replacement at index 1 ('order-detail' -> 'notifications')
+    const replaced = iosAdapter.onNativePathChange(['notifications']);
+    expect(replaced.currentRouteId).toBe('notifications');
+    expect(replaced.history.map((h) => h.routeId)).toEqual([
+      'home',
+      'notifications',
+    ]);
+
+    // Reject unregistered route ID in native path sequence
+    expect(() => iosAdapter.onNativePathChange(['non-existent-route'])).toThrow(
+      /unregistered route ID/
+    );
+  });
+
+  it('enforces guest-only route policy and HTTPS host allowlist in DeepLinkManager (Finding 9)', () => {
+    const sm = new NavigationStateManager({
+      navigationIR: navIR,
+      initialAccessContext: {
+        authenticated: true,
+        userId: 'usr_1',
+        roles: ['user'],
+        permissions: ['orders.read'],
+        verified: true,
+      },
+    });
+
+    const dl = new DeepLinkManager({
+      navigationIR: navIR,
+      stateManager: sm,
+    });
+
+    // Authenticated user visiting a 'guest' route (/login) is rejected and redirected to authenticatedEntry
+    const guestResult = dl.handleIncomingUrl('efshop://login', {
+      authenticatedEntryRouteId: 'home',
+    });
+    expect(guestResult.status).toBe('rejected');
+    expect(guestResult.reason).toBe('guest_only');
+    expect(guestResult.redirectRouteId).toBe('home');
+    expect(sm.getState().currentRouteId).toBe('home');
+
+    // HTTPS URL when linking.hosts is empty must be rejected as untrusted_host
+    const noHostsIR = {
+      ...navIR,
+      linking: {
+        ...navIR.linking,
+        hosts: [],
+      },
+    };
+    const dlNoHosts = new DeepLinkManager({
+      navigationIR: noHostsIR,
+      stateManager: sm,
+    });
+    const httpsRes = dlNoHosts.handleIncomingUrl(
+      'https://any-domain.example.com/orders/ORD-1'
+    );
+    expect(httpsRes.status).toBe('rejected');
+    expect(httpsRes.reason).toBe('untrusted_host');
+  });
+
+  it('runs Phase 0 Native Navigation POC runners with explicit simulated verification status (Finding 2)', () => {
+    const iosReport = runIOSNativeNavigationPoc();
+    expect(iosReport.verificationStatus).toBe('simulated');
+    expect(iosReport.fullSequenceReconciliationVerified).toBe(true);
+    expect(iosReport.allPassed).toBe(true);
+
+    const androidReport = runAndroidNativeNavigationPoc();
+    expect(androidReport.verificationStatus).toBe('simulated');
+    expect(androidReport.allPassed).toBe(true);
   });
 });

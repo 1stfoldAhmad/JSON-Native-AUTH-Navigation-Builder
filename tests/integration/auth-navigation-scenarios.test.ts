@@ -1,253 +1,395 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { AuthController, InMemoryTokenStorage } from '@expo-foundation/auth';
 import {
-  AuthController,
-  MemorySecureStorageAdapter,
-  RestAuthProviderAdapter,
-} from '@expo-foundation/auth';
-import { FoundationEventBus, InMemoryFlowRegistry } from '@expo-foundation/contracts';
-import { defaultFoundationCompiler } from '@expo-foundation/core';
+  FoundationEventBus,
+  InMemoryFlowRegistry,
+  type AuthProviderAdapter,
+  type AuthSession,
+} from '@expo-foundation/contracts';
+import {
+  FoundationCompiler,
+  type AuthConfigDocument,
+  type IntegrationConfigDocument,
+  type NavigationConfigDocument,
+} from '@expo-foundation/core';
 import { AuthNavigationBridge } from '@expo-foundation/integration';
-import {
-  AndroidNavigationAdapter,
-  IOSNativeNavigationAdapter,
-  NavigationStateManager,
-} from '@expo-foundation/navigation';
-import completeAuthJson from '../../examples/complete-foundation/auth.json' with { type: 'json' };
-import completeNavJson from '../../examples/complete-foundation/navigation.json' with { type: 'json' };
-import completeIntJson from '../../examples/complete-foundation/integration.json' with { type: 'json' };
-import { runIOSNativeNavigationPoc } from '../../examples/native-navigation-poc/ios/ios-poc-runner.js';
-import { runAndroidNativeNavigationPoc } from '../../examples/native-navigation-poc/android/android-poc-runner.js';
+import { NavigationStateManager } from '@expo-foundation/navigation';
+import completeAuthDoc from '../../examples/complete-foundation/auth.json' with { type: 'json' };
+import completeNavDoc from '../../examples/complete-foundation/navigation.json' with { type: 'json' };
+import completeIntDoc from '../../examples/complete-foundation/integration.json' with { type: 'json' };
 
-function createCompleteIntegrationHarness(options?: {
+function createTestHarness(options?: {
+  persistedSession?: AuthSession;
+  requireEmailVerification?: boolean;
+  userRoles?: string[];
+  userPermissions?: string[];
   shouldFailRefresh?: boolean;
-  expiresInSeconds?: number;
-  storage?: MemorySecureStorageAdapter;
 }) {
-  const compiled = defaultFoundationCompiler.compile({
-    auth: completeAuthJson,
-    navigation: completeNavJson,
-    integration: completeIntJson,
-  });
-  if (!compiled.ir?.auth || !compiled.ir.navigation || !compiled.ir.integration) {
-    throw new Error('Failed to compile complete foundation in test harness.');
+  const compiler = new FoundationCompiler();
+  const authDocClone = structuredClone(completeAuthDoc) as unknown as AuthConfigDocument;
+  if (options?.requireEmailVerification !== undefined) {
+    authDocClone.accessControl = {
+      ...authDocClone.accessControl,
+      requireEmailVerification: options.requireEmailVerification,
+    };
   }
 
-  const storage = options?.storage ?? new MemorySecureStorageAdapter();
+  const projectIR = compiler.compile({
+    auth: authDocClone,
+    navigation: completeNavDoc as unknown as NavigationConfigDocument,
+    integration: completeIntDoc as unknown as IntegrationConfigDocument,
+  });
+
   const eventBus = new FoundationEventBus();
   const flowRegistry = new InMemoryFlowRegistry();
+  for (const flowId of Object.values(projectIR.auth!.eventFlows)) {
+    flowRegistry.register(flowId, () => {});
+  }
 
-  const adapter = new RestAuthProviderAdapter({
-    httpClient: async (req) => {
-      if (req.url.endsWith('/refresh') && options?.shouldFailRefresh) {
+  const storage = new InMemoryTokenStorage();
+  const now = Date.now();
+  let serverRoles = options?.userRoles ?? ['user'];
+  let serverPermissions = options?.userPermissions ?? ['orders.read'];
+
+  const customAdapter: AuthProviderAdapter = {
+    providerType: 'rest',
+    initialize: vi.fn(async () => {}),
+    signIn: vi.fn(async (input) => {
+      const session: AuthSession = {
+        sessionId: `sess_${now}`,
+        user: {
+          id: 'usr_test_1',
+          email: input.email ?? 'user@expo.dev',
+          emailVerified: !(options?.requireEmailVerification ?? false),
+          roles: serverRoles,
+          permissions: serverPermissions,
+        },
+        tokens: {
+          accessToken: 'jwt_access_123',
+          refreshToken: 'jwt_refresh_456',
+          expiresAt: now + 3600_000,
+        },
+        provider: 'rest',
+        issuedAt: now,
+        expiresAt: now + 3600_000,
+      };
+      return {
+        status: 'authenticated' as const,
+        session,
+        user: session.user,
+      };
+    }),
+    signUp: vi.fn(async (input) => {
+      if (options?.requireEmailVerification) {
         return {
-          status: 401,
-          ok: false,
-          data: { message: 'Refresh token revoked or expired' },
+          status: 'verification_required' as const,
+          user: {
+            id: 'usr_new_unverified',
+            email: input.email ?? 'new@expo.dev',
+            emailVerified: false,
+          },
+          challenge: {
+            challengeId: 'chg_email_1',
+            type: 'email_verification' as const,
+            deliveryMedium: 'email' as const,
+          },
         };
       }
+      return customAdapter.signIn(input);
+    }),
+    signOut: vi.fn(async () => {}),
+    restoreSession: vi.fn(async () => options?.persistedSession ?? null),
+    refreshSession: vi.fn(async () => {
+      if (options?.shouldFailRefresh) {
+        throw new Error('Refresh token revoked or expired');
+      }
       return {
-        status: 200,
-        ok: true,
-        data: {
-          data: {
-            access_token: `access_${Date.now()}`,
-            refresh_token: `refresh_${Date.now()}`,
-            expires_in: options?.expiresInSeconds ?? 3600,
-            user: {
-              id: 'usr_100',
-              email: 'customer@example.com',
-              emailVerified: true,
-              roles: ['user'],
-              permissions: ['orders.read'],
-            },
-          },
+        sessionId: `sess_refreshed_${now}`,
+        user: {
+          id: 'usr_test_1',
+          email: 'user@expo.dev',
+          emailVerified: true,
+          roles: serverRoles,
+          permissions: serverPermissions,
         },
+        tokens: {
+          accessToken: 'jwt_access_refreshed',
+          refreshToken: 'jwt_refresh_rotated',
+          expiresAt: now + 3600_000,
+        },
+        provider: 'rest' as const,
+        issuedAt: now,
+        expiresAt: now + 3600_000,
       };
-    },
-  });
+    }),
+    requestPasswordReset: vi.fn(async () => {}),
+    resetPassword: vi.fn(async () => {}),
+    verifyEmail: vi.fn(async () => {}),
+    getCurrentUser: vi.fn(async () => ({
+      id: 'usr_test_1',
+      email: 'user@expo.dev',
+      emailVerified: true,
+      roles: serverRoles,
+      permissions: serverPermissions,
+    })),
+  };
 
   const authController = new AuthController({
-    authIR: compiled.ir.auth,
+    authIR: projectIR.auth!,
+    adapter: customAdapter,
     storage,
-    adapter,
     eventBus,
     flowRegistry,
+    now: () => now,
   });
 
-  const navStateManager = new NavigationStateManager({
-    navigationIR: compiled.ir.navigation,
+  const navManager = new NavigationStateManager({
+    navigationIR: projectIR.navigation!,
     eventBus,
   });
 
   const bridge = new AuthNavigationBridge({
-    integrationIR: compiled.ir.integration,
     authController,
-    navigationStateManager: navStateManager,
+    navigationStateManager: navManager,
+    navigationIR: projectIR.navigation!,
+    integrationIR: projectIR.integration!,
     eventBus,
     flowRegistry,
   });
 
-  const iosAdapter = new IOSNativeNavigationAdapter(navStateManager);
-  const androidAdapter = new AndroidNavigationAdapter(navStateManager);
-
   return {
+    projectIR,
+    authController,
+    navManager,
+    bridge,
     storage,
     eventBus,
     flowRegistry,
-    authController,
-    navStateManager,
-    bridge,
-    iosAdapter,
-    androidAdapter,
+    now,
+    setServerRolesAndPermissions(roles: string[], permissions: string[]) {
+      serverRoles = roles;
+      serverPermissions = permissions;
+    },
   };
 }
 
-describe('Section 18.B — 15 End-to-End Integration Scenarios & Phase 0 POC', () => {
-  it('verifies Phase 0 Native Navigation POC on iOS SwiftUI and Android Compose/Router', () => {
-    const iosPoc = runIOSNativeNavigationPoc();
-    expect(iosPoc.stackComponent).toBe('NavigationStack');
-    expect(iosPoc.importSource).toBe('@expo/ui/swift-ui');
-    expect(iosPoc.pushedRouteOnHome).toBe('app.orders.detail');
-    expect(iosPoc.restoredHomeTabRouteAfterSwitch).toBe('app.orders.detail');
-    expect(iosPoc.routeAfterNativeSwipeBack).toBe('app.home');
+describe('End-to-End Auth + Navigation Integration Scenarios (Section 18.2)', () => {
+  it('Scenario 1: App launch with no stored session -> routes to guestEntry (/login)', async () => {
+    const { bridge, navManager } = createTestHarness();
+    const res = await bridge.initialize();
 
-    const androidPoc = runAndroidNativeNavigationPoc();
-    expect(androidPoc.barComponent).toBe('NavigationBar');
-    expect(androidPoc.importSource).toBe('@expo/ui/jetpack-compose');
-    expect(androidPoc.routeAfterNestedBack).toBe('app.search');
-    expect(androidPoc.routeAfterTabRootBack).toBe('app.home');
+    expect(res.auth.status).toBe('anonymous');
+    expect(res.isNavigationReady).toBe(true);
+    expect(navManager.getState().currentRouteId).toBe('login');
   });
 
-  it('Scenarios 1–6: Login success, session restore across restart, token expiry, refresh renewal, refresh failure -> guest state', async () => {
-    const sharedStorage = new MemorySecureStorageAdapter();
+  it('Scenario 2: App launch with valid stored session -> restores session and routes to authenticatedEntry (/home)', async () => {
+    const now = Date.now();
+    const validSession: AuthSession = {
+      sessionId: 'sess_stored',
+      user: {
+        id: 'usr_stored',
+        email: 'stored@expo.dev',
+        emailVerified: true,
+        roles: ['user'],
+        permissions: ['orders.read'],
+      },
+      tokens: {
+        accessToken: 'valid_token',
+        refreshToken: 'valid_refresh',
+        expiresAt: now + 3600_000,
+      },
+      provider: 'rest',
+      issuedAt: now - 60_000,
+      expiresAt: now + 3600_000,
+    };
 
-    // Scenario 1: User logs in successfully
-    const appRun1 = createCompleteIntegrationHarness({ storage: sharedStorage });
-    await appRun1.authController.initialize();
-    expect(appRun1.authController.getState().status).toBe('anonymous');
-
-    let afterLoginFlowTriggered = false;
-    appRun1.flowRegistry.register('flow.auth.after-login', () => {
-      afterLoginFlowTriggered = true;
+    const { bridge, storage, navManager } = createTestHarness({
+      persistedSession: validSession,
     });
+    await storage.setItem(
+      'expo_foundation.auth.session.v1',
+      JSON.stringify(validSession)
+    );
 
-    await appRun1.authController.signIn({
-      email: 'customer@example.com',
-      password: 'correct-password',
+    const res = await bridge.initialize();
+    expect(res.auth.status).toBe('authenticated');
+    expect(navManager.getState().currentRouteId).toBe('home');
+  });
+
+  it('Scenario 3: App launch with expired access token & valid refresh token -> refreshes and routes to /home', async () => {
+    const now = Date.now();
+    const expiringSession: AuthSession = {
+      sessionId: 'sess_expiring',
+      user: {
+        id: 'usr_exp',
+        email: 'exp@expo.dev',
+        emailVerified: true,
+        roles: ['user'],
+        permissions: ['orders.read'],
+      },
+      tokens: {
+        accessToken: 'expired_access',
+        refreshToken: 'valid_refresh_token',
+        expiresAt: now - 5_000,
+      },
+      provider: 'rest',
+      issuedAt: now - 3600_000,
+      expiresAt: now - 5_000,
+    };
+
+    const { bridge, storage, navManager } = createTestHarness({
+      persistedSession: expiringSession,
     });
-    expect(appRun1.authController.getState().status).toBe('authenticated');
-    expect(appRun1.navStateManager.getState().activeRouteId).toBe('app.home');
-    expect(afterLoginFlowTriggered).toBe(true);
+    await storage.setItem(
+      'expo_foundation.auth.session.v1',
+      JSON.stringify(expiringSession)
+    );
 
-    // Scenario 2: Session restores after application restart
-    const appRun2 = createCompleteIntegrationHarness({ storage: sharedStorage });
-    await appRun2.authController.initialize();
-    expect(appRun2.authController.getState().status).toBe('authenticated');
-    expect(appRun2.navStateManager.getState().activeRouteId).toBe('app.home');
+    const res = await bridge.initialize();
+    expect(res.auth.status).toBe('authenticated');
+    expect(res.auth.session?.tokens.accessToken).toBe('jwt_access_refreshed');
+    expect(navManager.getState().currentRouteId).toBe('home');
+  });
 
-    // Scenario 3 & 4: Access token expires and refresh token is renewed
-    const futureTime = Date.now() + 7200_000;
-    const restoredAfterExpiry = await appRun2.authController.restoreSession(futureTime);
-    expect(restoredAfterExpiry.status).toBe('authenticated');
+  it('Scenario 4: App launch with expired refresh token -> clears session and routes to /login', async () => {
+    const now = Date.now();
+    const expiredSession: AuthSession = {
+      sessionId: 'sess_dead',
+      user: { id: 'usr_dead', email: 'dead@expo.dev' },
+      tokens: {
+        accessToken: 'expired_access',
+        refreshToken: 'expired_refresh',
+        expiresAt: now - 10_000,
+      },
+      provider: 'rest',
+      issuedAt: now - 7200_000,
+      expiresAt: now - 10_000,
+    };
 
-    // Scenario 5 & 6: Refresh fails -> application returns to guest state (auth.login)
-    const appRun3 = createCompleteIntegrationHarness({
-      storage: sharedStorage,
+    const { bridge, storage, navManager } = createTestHarness({
+      persistedSession: expiredSession,
       shouldFailRefresh: true,
     });
-    await appRun3.authController.adapter.initialize(
-      appRun3.authController.authIR.primaryProvider.config
+    await storage.setItem(
+      'expo_foundation.auth.session.v1',
+      JSON.stringify(expiredSession)
     );
-    const failedRefreshState = await appRun3.authController.restoreSession(futureTime);
-    expect(failedRefreshState.status).toBe('anonymous');
-    expect(appRun3.navStateManager.getState().activeRouteId).toBe('auth.login');
+
+    const res = await bridge.initialize();
+    expect(res.auth.status).toBe('anonymous');
+    expect(navManager.getState().currentRouteId).toBe('login');
   });
 
-  it('Scenarios 7–8: User logs out from a nested route and protected navigation history is cleared', async () => {
-    const harness = createCompleteIntegrationHarness();
-    await harness.authController.initialize();
-    await harness.authController.signIn({
-      email: 'customer@example.com',
-      password: 'password',
-    });
+  it('Scenario 5 & 9: Unauthenticated user opens protected deep link -> redirected to login -> logs in -> restored to deep link with params', async () => {
+    const { bridge, authController, navManager } = createTestHarness();
+    await bridge.initialize();
+    expect(navManager.getState().currentRouteId).toBe('login');
 
-    // Navigate deep into nested routes
-    harness.bridge.navigateGuarded('app.orders.detail', { orderId: 'ORD-500' });
-    harness.bridge.navigateGuarded('app.notifications');
-    expect(harness.navStateManager.getState().history.length).toBeGreaterThan(1);
-    expect(harness.navStateManager.getState().activeRouteId).toBe('app.notifications');
-
-    // Scenario 7 & 8: Logout from nested route -> clears protected history to single guest entry
-    await harness.authController.signOut();
-    const postLogoutNav = harness.navStateManager.getState();
-    expect(postLogoutNav.activeRouteId).toBe('auth.login');
-    expect(postLogoutNav.history).toHaveLength(1);
-    expect(postLogoutNav.history[0].routeId).toBe('auth.login');
-    expect(postLogoutNav.tabStacks).toEqual({});
-  });
-
-  it('Scenarios 9–10: Deep link opens authenticated destination -> defers to guest -> restores destination after login', async () => {
-    const harness = createCompleteIntegrationHarness();
-    await harness.authController.initialize();
-
-    // Scenario 9: Deep link to /orders/ORD-1024 while unauthenticated
-    const dlResult = harness.bridge.handleDeepLink('https://example.com/orders/ORD-1024');
-    expect(dlResult.status).toBe('deferred_to_guest');
-    expect(harness.navStateManager.getState().activeRouteId).toBe('auth.login');
-    expect(harness.bridge.deepLinkManager.getIntendedDestination()?.routeId).toBe(
-      'app.orders.detail'
+    const dlRes = bridge.handleDeepLink(
+      'efshop://orders/ORD-4200?tab=shipment'
     );
-    expect(harness.bridge.deepLinkManager.getIntendedDestination()?.params).toEqual({
-      orderId: 'ORD-1024',
+    expect(dlRes.status).toBe('deferred');
+    expect(navManager.getState().currentRouteId).toBe('login');
+    expect(navManager.getState().intendedDestination?.routeId).toBe(
+      'order-detail'
+    );
+
+    await authController.signIn({
+      email: 'customer@expo.dev',
+      password: 'Password123!',
     });
 
-    // Scenario 10: Login succeeds and automatically restores /orders/ORD-1024
-    await harness.authController.signIn({
-      email: 'customer@example.com',
-      password: 'password',
+    const finalState = navManager.getState();
+    expect(finalState.currentRouteId).toBe('order-detail');
+    expect(finalState.currentPath).toBe('/orders/ORD-4200?tab=shipment');
+    expect(finalState.currentParams).toEqual({
+      orderId: 'ORD-4200',
+      tab: 'shipment',
     });
-    expect(harness.navStateManager.getState().activeRouteId).toBe('app.orders.detail');
-    expect(harness.navStateManager.getState().params).toEqual({ orderId: 'ORD-1024' });
-    expect(harness.bridge.deepLinkManager.getIntendedDestination()).toBeNull();
   });
 
-  it('Scenarios 11–15: Tab switching, per-tab stack preservation, iOS back gesture, Android hardware back, invalid parameter rejection', async () => {
-    const harness = createCompleteIntegrationHarness();
-    await harness.authController.initialize();
-    await harness.authController.signIn({
-      email: 'customer@example.com',
-      password: 'password',
+  it('Scenario 6: Registration requiring email verification -> routes to /verify -> verifies -> routes to /home', async () => {
+    const { bridge, authController, navManager } = createTestHarness({
+      requireEmailVerification: true,
+    });
+    await bridge.initialize();
+
+    await authController.signUp({
+      email: 'newuser@expo.dev',
+      password: 'Password123!',
+    });
+    expect(authController.getSnapshot().status).toBe('verifying');
+    expect(navManager.getState().currentRouteId).toBe('verify-email');
+
+    await authController.verifyEmail({
+      code: '123456',
+      email: 'newuser@expo.dev',
+    });
+    expect(authController.getSnapshot().status).toBe('authenticated');
+    expect(navManager.getState().currentRouteId).toBe('home');
+  });
+
+  it('Scenario 7 & 10: Authenticated user without admin role blocked from /admin -> redirected to /access-denied; server role refresh re-evaluates route (Finding 14)', async () => {
+    const {
+      bridge,
+      authController,
+      navManager,
+      setServerRolesAndPermissions,
+    } = createTestHarness({
+      userRoles: ['user'],
+      userPermissions: ['orders.read'],
+    });
+    await bridge.initialize();
+    await authController.signIn({
+      email: 'user@expo.dev',
+      password: 'Password123!',
     });
 
-    // Scenario 11 & 12: Switch tabs and preserve each tab's stack
-    harness.iosAdapter.onNativeTabSelect('tab.home.stack');
-    harness.navStateManager.push('app.orders.detail', { orderId: 'ORD-777' });
-    expect(harness.navStateManager.getState().activeRouteId).toBe('app.orders.detail');
+    navManager.navigate('admin-dashboard');
+    expect(navManager.getState().currentRouteId).toBe('access-denied');
 
-    harness.iosAdapter.onNativeTabSelect('tab.search.stack');
-    expect(harness.navStateManager.getState().activeRouteId).toBe('app.search');
-    harness.navStateManager.push('app.products.detail', { productId: 'PROD-888' });
-    expect(harness.navStateManager.getState().activeRouteId).toBe('app.products.detail');
+    // Elevate to admin on the server and refresh AccessContext from server
+    setServerRolesAndPermissions(
+      ['admin', 'user'],
+      ['orders.read', 'admin.access']
+    );
+    await authController.refreshAccessContextFromServer();
+    navManager.navigate('admin-dashboard');
+    expect(navManager.getState().currentRouteId).toBe('admin-dashboard');
 
-    // Return to Home tab -> still on app.orders.detail
-    harness.iosAdapter.onNativeTabSelect('tab.home.stack');
-    expect(harness.navStateManager.getState().activeRouteId).toBe('app.orders.detail');
-    expect(harness.navStateManager.getState().params).toEqual({ orderId: 'ORD-777' });
+    // Demote admin role on the server while on /admin -> immediately redirects to /access-denied
+    setServerRolesAndPermissions(['user'], ['orders.read']);
+    await authController.refreshAccessContextFromServer();
+    expect(navManager.getState().currentRouteId).toBe('access-denied');
+  });
 
-    // Scenario 13: Native iOS back gesture updates router state
-    harness.iosAdapter.onNativePathChange(['app.home']);
-    expect(harness.navStateManager.getState().activeRouteId).toBe('app.home');
+  it('Scenario 8: User logs out from nested screen -> clears session and resets root stack to /login', async () => {
+    const { bridge, authController, navManager, flowRegistry } =
+      createTestHarness();
+    await bridge.initialize();
+    await authController.signIn({
+      email: 'user@expo.dev',
+      password: 'Password123!',
+    });
 
-    // Scenario 14: Android hardware back pops nested stack on Search tab
-    harness.androidAdapter.onComposeTabPress('tab.search.stack');
-    expect(harness.navStateManager.getState().activeRouteId).toBe('app.products.detail');
-    const hwBack = harness.androidAdapter.handleHardwareBack();
-    expect(hwBack.handled).toBe(true);
-    expect(hwBack.state.activeRouteId).toBe('app.search');
+    navManager.push('order-detail', { orderId: 'ORD-88' });
+    expect(navManager.getState().currentRouteId).toBe('order-detail');
 
-    // Scenario 15: Invalid parameters are rejected
-    expect(() =>
-      harness.navStateManager.push('app.orders.detail', {})
-    ).toThrow(/Missing required route parameter "orderId"/i);
+    await authController.signOut();
+    const afterLogout = navManager.getState();
+    expect(afterLogout.currentRouteId).toBe('login');
+    expect(afterLogout.history).toHaveLength(1);
+
+    // Verify single-owner flowRef execution (Finding 12: each flowRef executed once per event)
+    const executedFlows = flowRegistry
+      .getExecutionHistory()
+      .map((f) => f.flowRef);
+    expect(
+      executedFlows.filter((f) => f === 'flow.auth.after-login')
+    ).toHaveLength(1);
+    expect(
+      executedFlows.filter((f) => f === 'flow.auth.cleanup-user-cache')
+    ).toHaveLength(1);
   });
 });

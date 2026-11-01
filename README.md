@@ -1,62 +1,52 @@
-# Expo App Foundation Builder (`JSON-Native-AUTH-Navigation-Builder`)
+# `expo-app-foundation` — Reusable Expo Auth Builder & Native Navigation Builder (Expo SDK 58)
 
-A reusable, JSON-driven **Expo Auth Builder** and **Expo Native Navigation Builder** targeting **Expo SDK 58** (React Native 0.88, SwiftUI native navigation in `@expo/ui`, Jetpack Compose primitives in `@expo/ui`, and stable Expo Router custom navigator APIs).
-
----
-
-## Architecture Highlights
-
-- **Two Independently Executable Builders**:
-  - **Auth Builder (`@expo-foundation/auth`)**: Headless, provider-independent authentication runtime with an explicit 11-state machine, `expo-secure-store` session manager, single-flight `RefreshCoordinator`, configurable REST adapter with restricted `$` JSONPath mapping, and OAuth/OIDC PKCE adapter. Works standalone without Navigation Builder.
-  - **Navigation Builder (`@expo-foundation/navigation`)**: Route graph engine, centralized `RouteRegistry`, typed `ParameterResolver`, `DeepLinkManager`, iOS SwiftUI renderer (`NavigationStack`, `TabView`, `NavigationSplitView`, `Toolbar` via `createStandardRouterNavigator` & `integrateWithRouter`), and Android hybrid renderer (Jetpack Compose `NavigationBar` + `TopAppBar` + Expo Router `Stack` & `NativeTabs` fallback). Works standalone without Auth Builder.
-- **Shared Core & Compiler (`@expo-foundation/core` & `@expo-foundation/contracts`)**:
-  - Three independent JSON contracts (`auth.json`, `navigation.json`, `integration.json`) validated with JSON Schema 2020-12 (AJV), schema migrations (`0.9.0` → `1.0.0`), 9-stage compiler pipeline, Canonical `FoundationIR`, and SDK 58 `CapabilityRegistry`.
-  - Strict scope boundaries: references external screens by stable IDs (`screen.<domain>.<name>`) via `ScreenRegistry` and external business flows (`flow.<domain>.<action>`) via `FlowRegistry` — never embeds UI layout or form component trees.
-- **Integration & Deterministic Code Generator (`@expo-foundation/integration` & `@expo-foundation/expo-generator`)**:
-  - Event-driven `AuthNavigationBridge`, `RouteGuardManager`, safe post-login intended-destination restoration, deterministic Expo SDK 58 code generation with `.foundation-manifest.json` checksums, user-file protection, and `GeneratedOutputValidator`.
-- **Interactive Builder Studio (`apps/builder`)**:
-  - Web workspace featuring the Auth Builder, Navigation Builder, Integration & Runtime Simulator, Diagnostics Center, and Generated Expo Project Explorer.
+A production-ready, JSON-driven **Expo Auth Builder**, **Expo Native Navigation Builder**, **Auth-Navigation Integration Engine**, **Deterministic Expo SDK 58 Code Generator**, and **Interactive Builder Studio UI**.
 
 ---
 
-## Repository Structure
+## Architecture & Monorepo Packages
 
-```text
-├── apps/
-│   └── builder/                # Interactive Web Builder UI (Auth, Navigation, Integration, Diagnostics)
-├── packages/
-│   ├── contracts/              # ScreenReference, FlowReference, FoundationEventBus, AuthProviderAdapter
-│   ├── core/                   # JSON Schemas, Migrations, FoundationIR, CapabilityRegistry, Compiler
-│   ├── auth/                   # AuthStateMachine, AuthSessionManager, REST/OIDC/SDK Adapters, Generator
-│   ├── navigation/             # RouteRegistry, GraphEngine, DeepLinkManager, iOS & Android Renderers
-│   ├── integration/            # AuthNavigationBridge, RouteGuardManager, RedirectManager
-│   └── expo-generator/         # ExpoProjectGenerator, DependencyManager, GeneratedOutputValidator
-├── compatibility/
-│   └── sdk-58/                 # Expo SDK 58 packages, capabilities, and renderer mappings
-├── examples/
-│   ├── auth-only/              # Standalone Auth JSON example
-│   ├── navigation-only/        # Standalone Navigation JSON example
-│   ├── complete-foundation/    # Full Auth + Navigation + Integration JSON suite
-│   ├── native-navigation-poc/  # Phase 0 iOS SwiftUI & Android Compose/Router POC
-│   └── fixtures/               # Isolated test-only mock ScreenRegistry fixtures
-├── tests/                      # Unit, Compiler, Integration (15 scenarios), and Security test suites
-└── docs/                       # Master Technical Implementation Plan, ADRs, and module guides
-```
+| Package / App | Path | Responsibility |
+|---|---|---|
+| `@expo-foundation/contracts` | `packages/contracts` | Screen Reference (`screen.*`), Flow Reference (`flow.*`), Sanitized Event Bus (`emit` + deterministic `emitAsync`, recursion protection, single-owner `claimFlowDispatch`), and `AuthProviderAdapter` + `AuthProviderCapabilities` contracts |
+| `@expo-foundation/core` | `packages/core` | JSON Schemas (`auth`, `navigation`, `integration`), Semantic & Cross-Document Validators, Centralized `evaluateAccessPolicy()`, Expo SDK 58 `CapabilityRegistry` & Authoritative Version Resolver, and `FoundationCompiler` (`ProjectIR`) |
+| `@expo-foundation/auth` | `packages/auth` | 11-State `AuthStateMachine`, `ExpoSecureStoreAdapter` (default) & `InMemoryTokenStorage`, Single-Flight `SessionManager`, `RestAuthProviderAdapter` (fail-closed `${env.*}`, idempotent retry policy, strict claims), `OidcAuthProviderAdapter` (fail-closed PKCE S256, `state`/`nonce`, ID token verification), Apple/Google/Supabase/Firebase/Clerk SDK Adapters, and `AuthController` (`refreshAccessContextFromServer()`) |
+| `@expo-foundation/navigation` | `packages/navigation` | `RouteRegistry` (typed scalar params: `string`, `number`, `boolean`, `enum`, `uuid`, `date`, `custom-scalar`, `array`), `NavigationStateManager` (isolated `rootHistory`, `tabHistories`, `selectedTabs`, `modalStack`, and full `reconcilePathSequence()`), `DeepLinkManager` (strict HTTPS host allowlist & central access policy), `IOSNativeNavigationAdapter` (`@expo/ui/swift-ui` `<Host>` + `createStandardRouterNavigator`), `AndroidNativeNavigationAdapter` (`@expo/ui/jetpack-compose` `<Host>` + `<NavigationBar>` + `expo-router/native-tabs`), and Route Layout Compiler (`compileNavigatorLayoutFile`) |
+| `@expo-foundation/integration` | `packages/integration` | `RouteGuardManager`, `AuthNavigationBridge` / `AuthNavigationCoordinator`, startup session restoration gate, deferred deep-link replay, and real-time role/permission re-evaluation |
+| `@expo-foundation/expo-generator` | `packages/expo-generator` | Deterministic Expo SDK 58 project & module generator (`expo-app` and `reusable-module` targets) and Multi-Stage Output Validator |
+| `@expo-foundation/testing` | `packages/testing` | Isolated test-only mock providers (`MockAuthProviderAdapter`), sessions, challenges, and screen fixtures (never bundled in production runtimes) |
+| `@expo-foundation/builder` | `apps/builder` | Interactive React + Vite Builder Studio with `localStorage` project persistence, Undo/Redo revision history, visual Navigation Graph CRUD, Auth Builder, Runtime Simulator, Schema-Aware JSON Editor, and Bundle Exporter |
+
+---
+
+## Documentation Index
+
+- [Initial Repository Audit & 15-Finding Remediation Report](docs/audit/initial-repository-audit.md)
+- [Technical Implementation Plan](docs/architecture/technical-implementation-plan.md)
+- [Expo SDK 58 Package & Version Audit](docs/compatibility/sdk-58-package-audit.md)
+- [Expo SDK 58 Platform Capability Matrix](docs/platform-compatibility/sdk-58-matrix.md)
+- [Phase 0 Native Navigation POC Results](docs/poc-results/phase-0-native-navigation-poc.md)
+- [iOS SwiftUI Native Verification Protocol](docs/native-verification/ios-verification.md)
+- [Android Compose + Router Native Verification Protocol](docs/native-verification/android-verification.md)
+- [Release & CI Quality Gates](docs/development/release-quality-gates.md)
 
 ---
 
 ## Quick Start
 
 ```bash
-# Install dependencies
+# Install workspace dependencies
 npm install
 
-# Run full test suite (Unit, Compiler, Integration, Security)
-npm test
-
-# Typecheck all packages and builder app
+# Run strict TypeScript typecheck across all packages
 npm run typecheck
 
-# Launch the interactive Builder Studio
+# Run all 6 automated test suites (unit, compiler, integration, security)
+npm test
+
+# Build the interactive Builder Studio production bundle
+npm run build:builder
+
+# Start the interactive Builder Studio dev server
 npm run dev:builder
 ```

@@ -1,185 +1,314 @@
-import type { ScreenRegistry } from '@expo-foundation/contracts';
-import type { NavigationState, NavigationStateManager } from '../runtime/state-manager.js';
-
-export interface AndroidStackDescriptor {
-  routerComponent: 'Stack';
-  routerImportSource: 'expo-router';
-  uiBarComponent: 'TopAppBar';
-  uiBarImportSource: '@expo/ui/jetpack-compose';
-  activeRouteId: string;
-  activeScreenRef: string;
-  params: Record<string, unknown>;
-  canGoBack: boolean;
-  topAppBar: {
-    visible: boolean;
-    title: string;
-  };
-}
-
-export interface AndroidTabsDescriptor {
-  mode: 'compose-navigation-bar' | 'expo-router-native-tabs';
-  barComponent: 'NavigationBar' | 'NativeTabs';
-  importSource: '@expo/ui/jetpack-compose' | 'expo-router/unstable-native-tabs';
-  routerComponent: 'TabRouter';
-  selectedTab: string;
-  tabs: Array<{
-    tabId: string;
-    label: string;
-    icon: string;
-    badge?: string | number;
-    activeRouteId: string;
-  }>;
-}
-
 /**
- * AndroidNavigationAdapter
+ * @expo-foundation/navigation - Android Jetpack Compose + Expo Router Hybrid Renderer Adapter
  *
- * Implements the hybrid Android navigation engine (Section 5.6):
- * - Expo Router Stack for native route management + @expo/ui/jetpack-compose TopAppBar
- * - @expo/ui/jetpack-compose NavigationBar synchronized with Expo Router TabRouter
- *   (with approved fallback to Expo Router NativeTabs)
- * - Unified Android hardware/gesture back handling without competing history.
+ * Implements Section 9.2, Section 13.2, and Audit Finding 4:
+ * - Maps Android navigation primitives using @expo/ui/jetpack-compose (Host, TopAppBar,
+ *   NavigationBar, NavigationBarItem, ModalBottomSheet) paired with Expo Router Stack /
+ *   TabRouter / Drawer / NativeTabs ("expo-router/native-tabs")
  */
-export class AndroidNavigationAdapter {
+
+import type { NavigationIR, NavigatorIR } from '@expo-foundation/core';
+import type { NativeNavigationRenderer } from '../runtime/renderer-contract.js';
+import type {
+  NavigationStateManager,
+  NavigationStateSnapshot,
+} from '../runtime/state-manager.js';
+
+export interface AndroidNavigationDescriptor {
+  navigatorId: string;
+  routerComponent: 'Stack' | 'Tabs' | 'NativeTabs' | 'Drawer';
+  composeChromeComponent?:
+    | 'TopAppBar'
+    | 'NavigationBar'
+    | 'ModalBottomSheet';
+  hostComponent: 'Host';
+  fallbackUsed: boolean;
+  activeRouteId: string;
+  selectedTab?: string;
+  canGoBack: boolean;
+}
+
+export class AndroidNativeNavigationAdapter implements NativeNavigationRenderer {
   readonly platform = 'android' as const;
-  private readonly useNativeTabsFallback: boolean;
+  readonly engine = 'expo-ui-compose-router-hybrid';
 
-  constructor(
-    private readonly stateManager: NavigationStateManager,
-    options?: {
-      screenRegistry?: ScreenRegistry;
-      useNativeTabsFallback?: boolean;
-    }
-  ) {
-    this.useNativeTabsFallback =
-      options?.useNativeTabsFallback ??
-      stateManager.navigationIR.navigationPolicies.android.fallback === 'native-tabs';
+  private readonly ir: NavigationIR;
+  private readonly stateManager: NavigationStateManager;
+
+  constructor(ir: NavigationIR, stateManager: NavigationStateManager) {
+    this.ir = ir;
+    this.stateManager = stateManager;
   }
 
-  getStackDescriptor(navigatorId?: string): AndroidStackDescriptor {
+  renderNavigatorHierarchy(ir: NavigationIR, state: NavigationStateSnapshot) {
+    return {
+      platform: 'android' as const,
+      rootNavigatorId: ir.rootNavigator,
+      activeRouteId: state.currentRouteId,
+      hostComponent: 'Host' as const,
+    };
+  }
+
+  getNavigatorDescriptor(navigatorId: string): AndroidNavigationDescriptor {
+    const nav = this.ir.navigators[navigatorId];
+    if (!nav) {
+      throw new Error(`Navigator "${navigatorId}" not found in NavigationIR.`);
+    }
+
     const state = this.stateManager.getState();
-    const targetNavId = navigatorId ?? state.activeNavigatorId;
-    const navDef = this.stateManager.graph.getNavigator(targetNavId);
-    const activeRoute = this.stateManager.registry.getById(state.activeRouteId);
+    const mapped = this.mapNavigatorToAndroid(nav);
 
     return {
-      routerComponent: 'Stack',
-      routerImportSource: 'expo-router',
-      uiBarComponent: 'TopAppBar',
-      uiBarImportSource: '@expo/ui/jetpack-compose',
-      activeRouteId: state.activeRouteId,
-      activeScreenRef: activeRoute?.screenRef ?? 'screen.unknown',
-      params: state.params ?? {},
+      navigatorId: nav.id,
+      routerComponent: mapped.routerComponent,
+      composeChromeComponent: mapped.composeChromeComponent,
+      hostComponent: 'Host',
+      fallbackUsed: nav.androidCapability.fallbackUsed,
+      activeRouteId: state.currentRouteId,
+      selectedTab: state.navigatorStates[navigatorId]?.selectedTab,
       canGoBack: state.history.length > 1 || state.modalStack.length > 0,
-      topAppBar: {
-        visible:
-          activeRoute?.options.headerShown ??
-          navDef?.stackOptions?.headerVisible ??
-          true,
-        title:
-          activeRoute?.options.title ??
-          navDef?.stackOptions?.headerTitle ??
-          activeRoute?.name ??
-          state.activeRouteId,
-      },
     };
-  }
-
-  getTabsDescriptor(tabsNavigatorId: string): AndroidTabsDescriptor {
-    const navDef = this.stateManager.graph.getNavigator(tabsNavigatorId);
-    if (!navDef || navDef.type !== 'tabs') {
-      throw new Error(`Navigator "${tabsNavigatorId}" is not a tabs navigator.`);
-    }
-
-    const state = this.stateManager.getState();
-    const selectedTab =
-      state.selectedTab ?? navDef.tabsOptions?.initialTab ?? navDef.children[0];
-
-    const tabs = navDef.children.map((childId) => {
-      const tabConfig = navDef.tabsOptions?.tabs?.find((t) => t.routeId === childId);
-      const tabHistory = state.tabStacks[childId] ?? [];
-      const activeRouteId =
-        tabHistory[tabHistory.length - 1]?.routeId ??
-        this.stateManager.graph.resolveInitialRouteId(childId) ??
-        childId;
-      return {
-        tabId: childId,
-        label: tabConfig?.label ?? childId,
-        icon: tabConfig?.icon ?? 'home',
-        badge: tabConfig?.badge,
-        activeRouteId,
-      };
-    });
-
-    if (this.useNativeTabsFallback) {
-      return {
-        mode: 'expo-router-native-tabs',
-        barComponent: 'NativeTabs',
-        importSource: 'expo-router/unstable-native-tabs',
-        routerComponent: 'TabRouter',
-        selectedTab,
-        tabs,
-      };
-    }
-
-    return {
-      mode: 'compose-navigation-bar',
-      barComponent: 'NavigationBar',
-      importSource: '@expo/ui/jetpack-compose',
-      routerComponent: 'TabRouter',
-      selectedTab,
-      tabs,
-    };
-  }
-
-  onComposeTabPress(tabId: string): NavigationState {
-    return this.stateManager.switchTab(tabId);
   }
 
   /**
-   * Handles Android hardware back button or system back gesture:
-   * 1. If a modal is open, dismisses the top modal.
-   * 2. If inside a tab with a nested stack depth > 1, pops within that tab's stack.
-   * 3. If inside a non-initial tab at root, switches back to the initial tab.
-   * 4. If main stack depth > 1, pops the stack.
-   * 5. Otherwise returns { handled: false } so the OS can background the activity.
+   * Handles Android hardware back press.
+   * Returns `true` if consumed by popping modal or stack, `false` if at root.
    */
-  handleHardwareBack(): { handled: boolean; state: NavigationState } {
-    const current = this.stateManager.getState();
-
-    // 1. Modal dismissal
-    if (current.modalStack.length > 0) {
-      const next = this.stateManager.closeModal();
-      return { handled: true, state: next };
+  onHardwareBackPress(): { consumed: boolean; state: NavigationStateSnapshot } {
+    const before = this.stateManager.getState();
+    if (before.modalStack.length > 0) {
+      const next = this.stateManager.dismissModal();
+      return { consumed: true, state: next };
     }
-
-    // 2. Nested tab stack pop
-    if (current.selectedTab) {
-      const tabStack = current.tabStacks[current.selectedTab] ?? [];
-      if (tabStack.length > 1) {
-        const next = this.stateManager.pop();
-        return { handled: true, state: next };
-      }
-
-      // Check if we can return to the initial tab
-      const parentNavId = this.stateManager.graph.getParentNavigatorId(current.selectedTab);
-      const parentNav = parentNavId
-        ? this.stateManager.graph.getNavigator(parentNavId)
-        : undefined;
-      const initialTab =
-        parentNav?.tabsOptions?.initialTab ?? parentNav?.children[0];
-      if (initialTab && current.selectedTab !== initialTab) {
-        const next = this.stateManager.switchTab(initialTab);
-        return { handled: true, state: next };
-      }
+    if (before.history.length > 1) {
+      const next = this.stateManager.back();
+      return { consumed: true, state: next };
     }
-
-    // 3. Regular stack pop
-    if (current.history.length > 1) {
-      const next = this.stateManager.pop();
-      return { handled: true, state: next };
-    }
-
-    return { handled: false, state: current };
+    return { consumed: false, state: before };
   }
+
+  private mapNavigatorToAndroid(nav: NavigatorIR): {
+    routerComponent: 'Stack' | 'Tabs' | 'NativeTabs' | 'Drawer';
+    composeChromeComponent?: 'TopAppBar' | 'NavigationBar' | 'ModalBottomSheet';
+  } {
+    switch (nav.type) {
+      case 'stack':
+        return {
+          routerComponent: 'Stack',
+          composeChromeComponent: 'TopAppBar',
+        };
+      case 'tabs':
+        if (this.ir.androidRendererPreference === 'expo-router') {
+          return {
+            routerComponent:
+              this.ir.androidFallbackPreference === 'native-tabs'
+                ? 'NativeTabs'
+                : 'Tabs',
+          };
+        }
+        return {
+          routerComponent: 'Tabs',
+          composeChromeComponent: 'NavigationBar',
+        };
+      case 'drawer':
+      case 'split':
+        return {
+          routerComponent: 'Drawer',
+          composeChromeComponent: 'TopAppBar',
+        };
+      case 'modal':
+        return {
+          routerComponent: 'Stack',
+          composeChromeComponent: 'ModalBottomSheet',
+        };
+    }
+  }
+}
+
+/**
+ * Generates Android Jetpack Compose + Expo Router hybrid renderer modules for Expo SDK 58
+ * (Section 13.2 & Audit Finding 4).
+ */
+export function generateAndroidRendererModules(
+  ir: NavigationIR
+): Record<string, string> {
+  const stackModule = `import React from 'react';
+import { View, StyleSheet } from 'react-native';
+import { Stack, useRouter } from 'expo-router';
+import { Host, TopAppBar } from '@expo/ui/jetpack-compose';
+
+export interface AndroidNativeStackProps {
+  navigatorId: string;
+  headerVisible?: boolean;
+  headerTitle?: string;
+}
+
+export function AndroidNativeStack({
+  headerVisible = true,
+  headerTitle,
+  children,
+}: React.PropsWithChildren<AndroidNativeStackProps>) {
+  const router = useRouter();
+
+  return (
+    <View style={styles.container}>
+      {headerVisible && headerTitle ? (
+        <Host>
+          <TopAppBar
+            title={headerTitle}
+            onBackPress={() => {
+              if (router.canGoBack()) {
+                router.back();
+              }
+            }}
+          />
+        </Host>
+      ) : null}
+      <Stack screenOptions={{ headerShown: !headerTitle && headerVisible }}>
+        {children}
+      </Stack>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+});
+`;
+
+  const tabsModule = `import React from 'react';
+import { View, StyleSheet } from 'react-native';
+import {
+  createStandardRouterNavigator,
+  TabRouter,
+  useNavigationBuilder,
+} from 'expo-router';
+import { NativeTabs } from 'expo-router/native-tabs';
+import {
+  Host,
+  NavigationBar,
+  NavigationBarItem,
+} from '@expo/ui/jetpack-compose';
+
+export interface AndroidTabConfig {
+  routeId: string;
+  label: string;
+  icon: string;
+  badge?: string | number;
+}
+
+export interface AndroidNativeTabsProps {
+  navigatorId: string;
+  initialRouteName?: string;
+  tabs: AndroidTabConfig[];
+  useNativeTabsFallback?: boolean;
+}
+
+function AndroidComposeTabsNavigator({
+  initialRouteName,
+  tabs,
+  useNativeTabsFallback = false,
+  children,
+}: React.PropsWithChildren<AndroidNativeTabsProps>) {
+  const { state, descriptors, navigation, NavigationContent } = useNavigationBuilder(
+    TabRouter,
+    {
+      children,
+      initialRouteName,
+    }
+  );
+
+  if (useNativeTabsFallback) {
+    return <NativeTabs>{children}</NativeTabs>;
+  }
+
+  const activeRoute = state.routes[state.index];
+  const activeDescriptor = activeRoute ? descriptors[activeRoute.key] : undefined;
+
+  return (
+    <NavigationContent>
+      <View style={styles.container}>
+        <View style={styles.content}>
+          {activeDescriptor ? activeDescriptor.render() : null}
+        </View>
+        <Host>
+          <NavigationBar>
+            {tabs.map((tab) => {
+              const isSelected = activeRoute?.name === tab.routeId;
+              return (
+                <NavigationBarItem
+                  key={tab.routeId}
+                  selected={isSelected}
+                  onClick={() => navigation.navigate(tab.routeId)}
+                  label={tab.label}
+                  icon={tab.icon}
+                  badge={tab.badge}
+                />
+              );
+            })}
+          </NavigationBar>
+        </Host>
+      </View>
+    </NavigationContent>
+  );
+}
+
+export const AndroidNativeTabs = createStandardRouterNavigator(
+  AndroidComposeTabsNavigator,
+  TabRouter
+);
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+  },
+  content: {
+    flex: 1,
+  },
+});
+`;
+
+  const drawerModule = `import React from 'react';
+import { Drawer } from 'expo-router/drawer';
+
+export interface AndroidNativeDrawerProps {
+  navigatorId: string;
+}
+
+export function AndroidNativeDrawer({
+  children,
+}: React.PropsWithChildren<AndroidNativeDrawerProps>) {
+  return <Drawer>{children}</Drawer>;
+}
+`;
+
+  return {
+    'src/foundation/navigation/renderers/android/NativeStack.android.tsx':
+      stackModule,
+    'src/foundation/navigation/renderers/android/NativeTabs.android.tsx':
+      tabsModule,
+    'src/foundation/navigation/renderers/android/NativeDrawer.android.tsx':
+      drawerModule,
+    'src/foundation/navigation/renderers/android/descriptor-manifest.json':
+      JSON.stringify(
+        {
+          sdkVersion: 58,
+          platform: 'android',
+          mode: ir.androidMode,
+          rendererPreference: ir.androidRendererPreference,
+          fallbackPreference: ir.androidFallbackPreference,
+          hostComponent: 'Host',
+          nativeTabsImportPath: 'expo-router/native-tabs',
+          navigators: Object.values(ir.navigators).map((n) => ({
+            id: n.id,
+            type: n.type,
+            capability: n.androidCapability,
+          })),
+        },
+        null,
+        2
+      ),
+  };
 }
