@@ -1,0 +1,22 @@
+{
+  "name": "@expo-foundation/builder",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Expo Auth Builder, Navigation Builder, Integration & Diagnostics Workspace UI",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 5173"
+  },
+  "dependencies": {
+    "@expo-foundation/contracts": "*",
+    "@expo-foundation/core": "*",
+    "@expo-foundation/auth": "*",
+    "@expo-foundation/navigation": "*",
+    "@expo-foundation/integration": "*",
+    "@expo-foundation/expo-generator": "*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "schemaVersion": "1.0.0",
+  "builderVersion": "1.0.0",
+  "projectId": "expo-navigation-standalone-demo",
+  "moduleId": "navigation.standalone",
+  "id": "application.navigation",
+  "platforms": {
+    "ios": {
+      "renderer": "expo-ui",
+      "strictNative": true
+    },
+    "android": {
+      "renderer": "auto",
+      "fallback": "expo-router"
+    }
+  },
+  "rootNavigator": "root.stack",
+  "navigators": [
+    {
+      "id": "root.stack",
+      "type": "stack",
+      "initialRoute": "app.tabs",
+      "children": [
+        "app.tabs",
+        "modal.filter"
+      ]
+    },
+    {
+      "id": "app.tabs",
+      "type": "tabs",
+      "tabsOptions": {
+        "initialTab": "tab.home.stack",
+        "preserveTabState": true,
+        "tabs": [
+          { "routeId": "tab.home.stack", "label": "Catalog", "icon": "house.fill" },
+          { "routeId": "tab.search.stack", "label": "Search", "icon": "magnifyingglass" }
+        ]
+      },
+      "children": [
+        "tab.home.stack",
+        "tab.search.stack"
+      ]
+    },
+    {
+      "id": "tab.home.stack",
+      "type": "stack",
+      "initialRoute": "catalog.home",
+      "children": [
+        "catalog.home",
+        "catalog.product.detail"
+      ]
+    },
+    {
+      "id": "tab.search.stack",
+      "type": "stack",
+      "initialRoute": "catalog.search",
+      "children": [
+        "catalog.search"
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "id": "catalog.home",
+      "path": "/",
+      "screenRef": "screen.catalog.home",
+      "navigatorId": "tab.home.stack",
+      "access": "public",
+      "options": { "title": "Catalog Home" }
+    },
+    {
+      "id": "catalog.product.detail",
+      "path": "/products/:productId",
+      "screenRef": "screen.catalog.product-detail",
+      "navigatorId": "tab.home.stack",
+      "access": "public",
+      "params": {
+        "productId": { "type": "string", "required": true, "source": "path" }
+      },
+      "options": { "title": "Product Detail" }
+    },
+    {
+      "id": "catalog.search",
+      "path": "/search",
+      "screenRef": "screen.catalog.search",
+      "navigatorId": "tab.search.stack",
+      "access": "public",
+      "options": { "title": "Search" }
+    },
+    {
+      "id": "modal.filter",
+      "path": "/filter",
+      "screenRef": "screen.modal.filter",
+      "navigatorId": "root.stack",
+      "access": "public",
+      "options": { "title": "Filter", "presentation": "bottomSheet" }
+    }
+  ],
+  "linking": {
+    "scheme": "expocatalog",
+    "hosts": ["catalog.example.com"],
+    "universalLinks": true,
+    "androidAppLinks": true
+  }
+}

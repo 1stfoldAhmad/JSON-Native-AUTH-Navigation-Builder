@@ -1,0 +1,23 @@
+{
+  "name": "@expo-foundation/navigation",
+  "version": "1.0.0",
+  "description": "Reusable Expo Native Navigation Builder Engine: Route Graph, Registry, Deep Linking, iOS SwiftUI & Android Compose/Router Renderers",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema": "./src/schema/index.ts",
+    "./route-registry": "./src/route-registry/index.ts",
+    "./graph": "./src/graph/index.ts",
+    "./runtime": "./src/runtime/index.ts",
+    "./deep-linking": "./src/deep-linking/index.ts",
+    "./ios-renderer": "./src/ios-renderer/index.ts",
+    "./android-renderer": "./src/android-renderer/index.ts",
+    "./generator": "./src/generator/index.ts"
+  },
+  "dependencies": {
+    "@expo-foundation/contracts": "*",
+    "@expo-foundation/core": "*"
+  }
+}

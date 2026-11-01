@@ -1,0 +1,33 @@
+{
+  "schemaVersion": "1.0.0",
+  "builderVersion": "1.0.0",
+  "projectId": "expo-complete-commerce-foundation",
+  "moduleId": "integration.commerce",
+  "id": "application.integration",
+  "authNavigation": {
+    "enabled": true,
+    "guestEntry": "auth.login",
+    "authenticatedEntry": "app.home",
+    "afterLogin": "restore-intended-destination",
+    "afterRegistration": "auth.login",
+    "afterLogout": "auth.login",
+    "verificationRoute": "auth.verify",
+    "accessDeniedRoute": "auth.access-denied",
+    "sessionExpiredRoute": "auth.login",
+    "accountSuspendedRoute": "auth.access-denied",
+    "roleRouteGroups": {
+      "admin": "admin.dashboard"
+    },
+    "events": {
+      "login.success": {
+        "action": "restore-intended-destination",
+        "flowRef": "flow.auth.after-login"
+      },
+      "registration.completed": {
+        "action": "navigate",
+        "targetRoute": "auth.login",
+        "flowRef": "flow.registration.initialize"
+      }
+    }
+  }
+}
